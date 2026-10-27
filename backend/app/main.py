@@ -1,4 +1,4 @@
-"""Immigration Consultant CRM — Phase 1 API + Phase 2/3 routes.
+"""Immigration Consultant CRM — Phase 1 API + Phase 2/3/4/5 routes.
 
 Endpoints (all tenant-scoped; branch-scoped for non-admin staff):
   GET  /api/health
@@ -16,6 +16,8 @@ Endpoints (all tenant-scoped; branch-scoped for non-admin staff):
   queue, AI suggestions, submission packet, expiry alerts, client portal).
   Phase 4 routes live in routers_phase4.py (billing, subscription,
   deadline engine, reports, portal AI assistant).
+  Phase 5 routes live in routers_phase5.py (retainers, IRCC forms,
+  document chasing, eligibility pre-check).
 """
 from datetime import date
 from fastapi import FastAPI, Depends, HTTPException
@@ -25,21 +27,24 @@ from sqlalchemy.orm import Session
 
 from .db import get_db, engine, Base
 from .models import Tenant, Branch, User, Lead, Client, Case, CaseStageEvent, StreamTemplate, LEAD_STAGES
-from . import auth, messaging, booking, documents
+from . import auth, messaging, booking, documents, automation
 from . import models_phase2  # noqa: F401 — registers Phase 2 tables for create_all
 from . import models_phase3  # noqa: F401 — registers Phase 3 tables for create_all
 from . import models_phase4  # noqa: F401 — registers Phase 4 tables for create_all
+from . import models_phase5  # noqa: F401 — registers Phase 5 tables for create_all
 from .routers_phase2 import router as phase2_router
 from .routers_phase3 import router as phase3_router
 from .routers_phase4 import router as phase4_router
+from .routers_phase5 import router as phase5_router
 from .seed import seed as run_seed
 
 Base.metadata.create_all(bind=engine)
-app = FastAPI(title="Immigration Consultant CRM — Phase 4")
+app = FastAPI(title="Immigration Consultant CRM — Phase 5")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 app.include_router(phase2_router)
 app.include_router(phase3_router)
 app.include_router(phase4_router)
+app.include_router(phase5_router)
 if messaging.ALLOW_TEST_HOOKS:
     from .test_hooks import router as test_hooks_router
     app.include_router(test_hooks_router)
@@ -52,7 +57,7 @@ def startup():
 
 @app.get("/api/health")
 def health():
-    return {"status": "ok", "phase": 4}
+    return {"status": "ok", "phase": 5}
 
 
 # ---------- auth ----------
@@ -315,6 +320,14 @@ def patch_case(case_id: int, body: CasePatch, user: User = Depends(auth.current_
         raise HTTPException(404, "Case not found")
     data = body.model_dump(exclude_unset=True)
     if "stage" in data and data["stage"] != case.stage:
+        # Phase 5 gate (server-side, never UI-only): a case cannot leave
+        # its opening stage until its retainer is signed. Cases already
+        # past the opening stage (e.g. seeded cases) are grandfathered;
+        # a case created directly at a later stage implies the retainer
+        # step was handled offline.
+        if case.stage == automation.opening_stage(db, user.tenant_id, case) \
+                and not automation.retainer_signed(db, user.tenant_id, case.id):
+            raise HTTPException(400, "Retainer must be signed before the case leaves its opening stage")
         db.add(CaseStageEvent(case_id=case.id, from_stage=case.stage, to_stage=data["stage"],
                               note="Stage moved"))
     for k, v in data.items():

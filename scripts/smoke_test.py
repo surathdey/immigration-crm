@@ -1,4 +1,4 @@
-"""Phase 1 + Phase 2 + Phase 3 + Phase 4 acceptance smoke test. Boots nothing
+"""Phase 1 + Phase 2 + Phase 3 + Phase 4 + Phase 5 acceptance smoke test. Boots nothing
 itself — run against a live backend (see README). Exits non-zero if
 any check fails.
 Usage: python scripts/smoke_test.py [BASE_URL]
@@ -48,7 +48,7 @@ def iso(dt):
 
 
 s, health = call("GET", "/api/health")
-check("health 200 + phase 4", s == 200 and health.get("phase") == 4, str(health))
+check("health 200 + phase 5", s == 200 and health.get("phase") == 5, str(health))
 
 s, otp = call("POST", "/api/auth/request-otp", body={"email": "admin@demo.example"})
 code = otp.get("dev_code")
@@ -72,6 +72,14 @@ cid = conv.get("client_id")
 s, view = call("GET", f"/api/clients/{cid}", token=token)
 check("client 360 shows case", s == 200 and len(view.get("cases", [])) == 1, str(view))
 case_id = view["cases"][0]["id"]
+s, blocked = call("PATCH", f"/api/cases/{case_id}", token=token, body={"stage": "Documents"})
+check("P5 unsigned retainer blocks leaving the opening stage", s == 400, str(blocked))
+s, ret = call("POST", f"/api/cases/{case_id}/retainers", token=token, body={})
+check("P5 retainer generated (draft, standard template)", s == 200 and ret.get("status") == "draft"
+      and "Smoke Test Person" in ret.get("body", ""), str(ret))
+s, signed = call("POST", f"/api/retainers/{ret['id']}/sign", token=token, body={"signer_name": "Smoke Test Person"})
+check("P5 retainer signed in-app (typed name + audit)", s == 200 and signed.get("status") == "signed"
+      and signed.get("method") == "in-app-typed" and bool(signed.get("signed_at")), str(signed))
 s, moved = call("PATCH", f"/api/cases/{case_id}", token=token, body={"stage": "Documents"})
 check("case stage move appends timeline", s == 200 and len(moved.get("events", [])) >= 2, str(moved))
 s, dash = call("GET", "/api/dashboard", token=token)
@@ -727,6 +735,117 @@ s, inv_other = call("POST", f"/api/cases/{other_case}/invoices", token, body={
     "line_items": [{"description": "Fee", "amount_cents": 1000}]})
 s, pinv_bad = call("GET", f"/api/portal/invoices/{inv_other['id']}", ptoken)
 check("P4 portal cannot open another client's invoice (404)", s == 404, str(pinv_bad))
+
+# ---------- Phase 5 ----------
+# Fresh case for the Phase 5 checks (the ambient case_id is the seed
+# case by now — Phase 2 rebound it — so do not reuse it here).
+s, p5_lead = call("POST", "/api/leads", token=token, body={
+    "full_name": "Phase Five Person", "email": "p5@example.com", "source": "Website",
+    "stream_of_interest": "Express Entry", "stage": "New"})
+s, p5_conv = call("POST", f"/api/leads/{p5_lead['id']}/convert", token=token)
+p5_case = p5_conv["case"]["id"]
+check("P5 fresh case for phase checks", s == 200 and bool(p5_case), str(p5_conv))
+# Standard retainer first (no custom template exists yet), then sign it.
+s, ret_std = call("POST", f"/api/cases/{p5_case}/retainers", token=token, body={})
+check("P5 retainer generated (draft, standard template)", s == 200 and ret_std.get("status") == "draft"
+      and "Phase Five Person" in ret_std.get("body", "")
+      and "CUSTOM-MARKER" not in ret_std.get("body", ""), str(ret_std))
+s, ret_signed = call("POST", f"/api/retainers/{ret_std['id']}/sign", token=token, body={"signer_name": "Phase Five Person"})
+check("P5 retainer signed in-app (typed name + audit)", s == 200 and ret_signed.get("status") == "signed"
+      and ret_signed.get("method") == "in-app-typed" and bool(ret_signed.get("signed_at")), str(ret_signed))
+# Retainer templates: firm-admin custom template replaces the standard one.
+s, tmpl5 = call("POST", "/api/retainer-templates", token=token, body={
+    "name": "Smoke firm retainer", "body": "CUSTOM-MARKER retainer for {client_name} at {firm_name}."})
+check("P5 firm retainer template created (firm admin)", s == 200 and tmpl5.get("id"), str(tmpl5))
+s, ret2 = call("POST", f"/api/cases/{p5_case}/retainers", token=token, body={"template_id": tmpl5["id"]})
+check("P5 retainer from firm template carries the custom body", s == 200 and "CUSTOM-MARKER" in ret2.get("body", ""), str(ret2))
+s, again = call("POST", f"/api/retainers/{ret_std['id']}/sign", token=token, body={"signer_name": "Again"})
+check("P5 signed retainer cannot be re-signed", s == 400, str(again))
+s, audit = call("GET", "/api/audit-log", token=token)
+check("P5 retainer signature is in the audit log", s == 200 and any(a.get("action") == "retainer_signed" for a in audit), str(audit)[:200])
+s, rets = call("GET", f"/api/cases/{p5_case}/retainers", token=token)
+check("P5 retainer list shows draft + signed", s == 200 and len(rets) >= 2
+      and any(r.get("status") == "signed" for r in rets), str(rets))
+
+# Gate proof on a fresh case (case_id already moved past its opening stage).
+s, g_lead = call("POST", "/api/leads", token=token, body={
+    "full_name": "Gate Person", "email": "gate@example.com", "source": "Website",
+    "stream_of_interest": "Express Entry", "stage": "New"})
+s, g_conv = call("POST", f"/api/leads/{g_lead['id']}/convert", token=token)
+gate_case = g_conv["case"]["id"]
+s, g_blocked = call("PATCH", f"/api/cases/{gate_case}", token=token, body={"stage": "Documents"})
+check("P5 gate: fresh case cannot leave Consultation unsigned", s == 400, str(g_blocked))
+s, g_ret = call("POST", f"/api/cases/{gate_case}/retainers", token=token, body={})
+s, g_signed = call("POST", f"/api/retainers/{g_ret['id']}/sign", token=token, body={"signer_name": "Gate Person"})
+s, g_moved = call("PATCH", f"/api/cases/{gate_case}", token=token, body={"stage": "Documents"})
+check("P5 gate: signed retainer lets the case move", s == 200 and g_moved.get("stage") == "Documents", str(g_moved))
+
+# IRCC forms: generate, correct (new version), render, all five codes.
+s, form = call("POST", f"/api/cases/{p5_case}/ircc-forms", token=token, body={"form_code": "IMM 0008"})
+check("P5 IMM 0008 generated from case data", s == 200 and form.get("version_no") == 1
+      and form.get("data", {}).get("applicant_name") == "Phase Five Person", str(form))
+s, bad_form = call("POST", f"/api/cases/{p5_case}/ircc-forms", token=token, body={"form_code": "IMM 9999"})
+check("P5 unknown IRCC form code rejected", s == 400, str(bad_form))
+s, corrected = call("PATCH", f"/api/ircc-forms/{form['id']}", token=token, body={"corrections": {"uci": "9999-8888"}, "note": "test correction"})
+check("P5 consultant correction is a new version", s == 200 and corrected.get("version_no") == 2
+      and corrected.get("status") == "corrected" and corrected.get("data", {}).get("uci") == "9999-8888", str(corrected))
+s, forms = call("GET", f"/api/cases/{p5_case}/ircc-forms", token=token)
+v1 = [f for f in forms if f["form_code"] == "IMM 0008" and f["version_no"] == 1]
+check("P5 v1 unchanged after correction (versioned, never overwritten)", s == 200 and len(v1) == 1
+      and v1[0]["data"].get("uci") != "9999-8888", str(v1))
+s, detail = call("GET", f"/api/ircc-forms/{form['id']}", token=token)
+check("P5 form rendering is plainly not an official IRCC PDF", s == 200
+      and "NOT AN OFFICIAL IRCC PDF" in detail.get("rendering", "")
+      and "IMM 0008" in detail.get("rendering", ""), str(detail)[:200])
+for code in ["IMM 5669", "IMM 5257", "IMM 1294", "IMM 5476"]:
+    s, f = call("POST", f"/api/cases/{p5_case}/ircc-forms", token=token, body={"form_code": code})
+    check(f"P5 {code} generates", s == 200 and f.get("version_no") == 1, str(f))
+s, bad_corr = call("PATCH", f"/api/ircc-forms/{form['id']}", token=token, body={"corrections": {"nope": "x"}})
+check("P5 correction of an unknown field rejected", s == 400, str(bad_corr))
+
+# Document chasing: log mode, idempotent, stops when the item arrives.
+s, chase1 = call("POST", "/api/jobs/run-chasing", token=token, body={})
+check("P5 chasing run chases missing items (log mode)", s == 200 and chase1.get("chased", 0) >= 1, str(chase1))
+s, chase2 = call("POST", "/api/jobs/run-chasing", token=token, body={})
+check("P5 chasing is idempotent within 7 days", s == 200 and chase2.get("chased") == 0
+      and chase2.get("skipped_recent", 0) >= 1, str(chase2))
+s, chases = call("GET", f"/api/cases/{case_id}/chases", token=token)
+check("P5 chase log recorded per item/channel, log mode only", s == 200 and len(chases) >= 1
+      and all(c.get("message_status") == "would_send" for c in chases), str(chases))
+s, a_lead = call("POST", "/api/leads", token=token, body={
+    "full_name": "Arrival Person", "email": "arrival@example.com", "phone": "+1 416 555 0199",
+    "source": "Website", "stream_of_interest": "Express Entry", "stage": "New"})
+s, a_conv = call("POST", f"/api/leads/{a_lead['id']}/convert", token=token)
+arr_case = a_conv["case"]["id"]
+s, arr_items = call("GET", f"/api/cases/{arr_case}/checklist", token=token)
+first_item = arr_items[0]
+s, up = upload_file(f"/api/checklist-items/{first_item['id']}/upload", token, "passport.txt", b"passport data")
+check("P5 arrival upload moves the item to Uploaded", s == 200 and up.get("review_decision") == "pending", str(up))
+s, chase3 = call("POST", "/api/jobs/run-chasing", token=token, body={})
+s, arr_chases = call("GET", f"/api/cases/{arr_case}/chases", token=token)
+chased_ids = {c["checklist_item_id"] for c in arr_chases}
+check("P5 arrived item is not chased, missing siblings are", s == 200
+      and first_item["id"] not in chased_ids and len(arr_chases) >= 1, str(arr_chases))
+
+# Eligibility pre-check (6.4): public by firm_slug, staff by token, disclaimer always.
+s, pc = call("POST", "/api/precheck", body={
+    "firm_slug": "demo-firm",
+    "answers": {"education": "bachelor", "language_clb": 8, "work_years": 4, "age_band": "under-30"},
+    "full_name": "Precheck Prospect", "email": "precheck@example.com"})
+check("P5 public pre-check ranks Express Entry first with disclaimer", s == 200
+      and pc.get("ranked") and pc["ranked"][0]["stream"] == "Express Entry"
+      and "not legal advice" in pc.get("disclaimer", "").lower()
+      and "you are eligible" not in json.dumps(pc).lower(), str(pc))
+pc_lead = pc.get("lead_id")
+s, pc_rows = call("GET", f"/api/leads/{pc_lead}/prechecks", token=token)
+check("P5 pre-check result arrives on the lead as a pre-check only", s == 200 and len(pc_rows) == 1
+      and "not legal advice" in pc_rows[0].get("disclaimer", "").lower(), str(pc_rows))
+s, pc_staff = call("POST", "/api/staff/precheck", token=token, body={
+    "answers": {"family_in_canada": True}})
+check("P5 staff pre-check surfaces Family Sponsorship", s == 200
+      and any(r["stream"] == "Family Sponsorship" for r in pc_staff.get("ranked", [])), str(pc_staff))
+s, pc_bad = call("POST", "/api/precheck", body={"firm_slug": "no-such-firm", "answers": {}})
+check("P5 pre-check for an unknown firm is 404", s == 404, str(pc_bad))
 
 print(f"\n{len(passed)} passed, {len(failed)} failed")
 if failed:

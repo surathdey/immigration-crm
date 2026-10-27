@@ -224,15 +224,69 @@ internals") gets 403 on billing and report endpoints; subscription is
 firm-admin only. Branch scoping from Phase 1 still applies to billing
 rows.
 
+## Phase 5 — automation (retainers, IRCC forms, document chasing, eligibility pre-check, Section 6.4)
+
+**Retainers:** a standard template (drafted for the firm's lawyer to
+review, per the design doc) generates the agreement text with the
+client, firm, stream, and fee notes filled in; a firm-supplied template
+replaces it when one exists (firm-admin only). Signing is captured
+**in-app**: the signer types their name, the timestamp is recorded, and
+an audit row is written. There is **no third-party e-signature
+provider** in this build and none is claimed. **The retainer gate is
+server-side, never UI-only:** a case cannot leave its opening stage
+(first stage of its stream, usually Consultation) until a signed
+retainer exists for it — the PATCH refuses with a clear error. Cases
+already past the opening stage are grandfathered, and a case created
+directly at a later stage implies the retainer step was handled
+offline. A signed retainer cannot be re-signed.
+
+**IRCC forms (IMM 0008, 5669, 5257, 1294, 5476):** each form's fields
+are mapped from case/client data at generation (anything the case does
+not hold stays blank for the consultant — the generator never invents
+a case fact). A consultant correction is a **new version**; the old
+version is never overwritten, and unknown fields are refused. The
+detail view includes a plain-text **printable rendering** that is
+plainly marked **NOT AN OFFICIAL IRCC PDF** — official templates are
+not available here. **Nothing is ever submitted to IRCC by this
+system:** there is no submission path anywhere in the codebase;
+submission is a human act by the licensed consultant, recorded
+afterwards.
+
+**Document chasing:** the chasing job (`POST /api/jobs/run-chasing`)
+reminds clients about every missing checklist item (Not Started,
+Requested, Rejected, Expired) through the Phase 2 adapters — log mode
+by default, so nothing is delivered until the firm's sender is
+verified. One chase per item per channel per 7 days (idempotent), and
+chasing **stops when the item arrives** (Uploaded / Under Review /
+Approved is no longer missing). Every chase is logged per case.
+
+**Eligibility pre-check (6.4, headline selling feature):** a
+rules-based questionnaire (education, language CLB, work years, age
+band, job offer, family in Canada, admission letter, proof of funds,
+province of interest) returns likely streams **to explore**, ranked,
+with plain-language reasons. Every result — in the API response and in
+the stored row — carries the disclaimer: "Not legal advice — this is a
+triage aid only; the consultant decides. It is not an eligibility
+decision and promises no outcome." The result is stored on the lead as
+a **pre-check only** (public endpoint resolves the firm by firm_slug,
+the Calendly precedent; staff can also run it in-tenant). It never
+decides eligibility, never promises an outcome, and never replaces the
+consultant's assessment in the first consultation.
+
+**Roles:** receptionists cannot write Phase 5 objects (retainer
+generate/sign, form generate/correct, chasing job, templates — 403);
+retainer templates are firm-admin only.
+
 ## Acceptance-test checklist (actually run, Oct 27, 2026)
 
 Backend booted from `backend/` on a fresh SQLite file with
 `DEV_OTP=true`, `ALLOW_TEST_HOOKS=true`; `python scripts/smoke_test.py`
-(123 checks), `scripts/phase4_isolation_probe.py` (13 checks),
+(155 checks), `scripts/phase5_isolation_probe.py` (17 checks),
+`scripts/phase4_isolation_probe.py` (13 checks),
 `scripts/phase3_isolation_probe.py` (11 checks),
 `scripts/phase2_unit_checks.py` (10 checks), and `vite build` — all
-against the same build. Phase 1–3 checks re-ran unchanged
-(health now reports phase 4).
+against the same build. Phase 1–4 checks re-ran unchanged
+(health now reports phase 5).
 
 | # | Check | Result |
 |---|-------|--------|
@@ -287,8 +341,15 @@ against the same build. Phase 1–3 checks re-ran unchanged
 | 64 | Portal assistant: status answer cites own stage, not routed; eligibility question routed to consultant; another client's case refused (404); staff review turns on the case | PASS |
 | 65 | Portal lists own invoices only; another client's invoice refused (404) | PASS |
 | 66 | Isolation probe: Firm B sees no Firm A billing/reports/subscription; receptionist 403 on billing/reports; portal/staff token separation (13 probe checks) | PASS |
+| 67 | Unsigned retainer blocks leaving the opening stage (server-side); signed retainer lets the case move; stage move still appends timeline | PASS |
+| 68 | Retainer generated from the standard template (client name filled in); signed in-app (typed name, method, timestamp) | PASS |
+| 69 | Firm retainer template (firm admin) replaces the standard text; signed retainer cannot be re-signed; signature in the audit log; list shows draft + signed | PASS |
+| 70 | IMM 0008 generated from case data; unknown form code refused; correction is a new version (v1 unchanged); rendering marked NOT AN OFFICIAL IRCC PDF; all five codes generate; unknown field refused | PASS |
+| 71 | Chasing run chases missing items in log mode; idempotent within 7 days; chase log per item/channel; arrived item not chased while missing siblings are | PASS |
+| 72 | Public pre-check (firm_slug) ranks Express Entry first with disclaimer and no eligibility promise; result on the lead as a pre-check only; staff pre-check surfaces Family Sponsorship; unknown firm 404 | PASS |
+| 73 | Isolation probe: Firm B sees no Firm A retainers/forms/chases/pre-checks and 404s on ids; receptionist 403 on all Phase 5 writes and templates (17 probe checks) | PASS |
 
-Total: 123 smoke + 13 + 11 isolation + 10 unit, 0 failed. Docker Compose was
+Total: 155 smoke + 17 + 13 + 11 isolation + 10 unit, 0 failed. Docker Compose was
 NOT run here (no Docker on the build machine) — it is provided
 following the proven platform pattern and needs one
 `docker compose up --build` on a Docker host before it counts as
@@ -322,13 +383,21 @@ verified.
   case and gets an answer drawn from their case data, or a routing to
   the consultant when the assistant does not know) — same deferred
   phase-by-phase testing.
+- The Phase 5 demo gate with Surath (a retainer is signed and recorded
+  on the file; a form is generated from case data, corrected by the
+  consultant, and stored versioned on the case; a missing document is
+  chased automatically until it arrives; a prospect completes the
+  pre-check and sees likely streams with the disclaimer, and the result
+  arrives on the lead as a pre-check only; the system still never
+  submits anything to IRCC on its own) — same deferred phase-by-phase
+  testing.
 - Live Stripe charging (card payments are recorded, not charged, in
   this build) and any proration/trial/dunning subscription flow (the
   design doc does not specify one).
 
 ## Phase gate
 
-Phase 4 is built and committed locally (not yet pushed — the parent
+Phase 5 is built and committed locally (not yet pushed — the parent
 pushes after verification). Testing is deferred: the user tests phase
 by phase later.
 

@@ -66,7 +66,7 @@ function App() {
   }, [token])
   useEffect(() => {
     if (!token) return
-    const path = page === 'dashboard' ? '/api/dashboard' : page === 'leads' ? '/api/leads' : page === 'clients' ? '/api/clients' : page === 'cases' ? '/api/cases' : page === 'messages' ? '/api/cases' : page === 'calendar' ? '/api/consultations' : page === 'comms' ? '/api/settings/communications' : page === 'documents' ? '/api/review-queue' : page === 'billing' ? '/api/invoices' : page === 'reports' ? '/api/reports/summary' : '/api/settings'
+    const path = page === 'dashboard' ? '/api/dashboard' : page === 'leads' ? '/api/leads' : page === 'clients' ? '/api/clients' : page === 'cases' ? '/api/cases' : page === 'messages' ? '/api/cases' : page === 'calendar' ? '/api/consultations' : page === 'comms' ? '/api/settings/communications' : page === 'documents' ? '/api/review-queue' : page === 'billing' ? '/api/invoices' : page === 'reports' ? '/api/reports/summary' : page === 'retainers' || page === 'forms' || page === 'chasing' || page === 'precheck' ? '/api/cases' : '/api/settings'
     api(path, token).then(setData).catch(e => setErr(String(e)))
   }, [token, page])
   if (portalToken) return <PortalApp token={portalToken} onSignOut={() => { localStorage.removeItem('icrm_portal_token'); setPortalToken(null); setPortal(false) }} />
@@ -80,7 +80,7 @@ function App() {
       <span>{me ? `${me.full_name} (${me.role}) — ${me.tenant}` : ''} <button onClick={() => { localStorage.removeItem('icrm_token'); setToken(null) }}>Sign out</button></span>
     </div>
     <div style={{ marginBottom: 16 }}>
-      {['dashboard', 'leads', 'clients', 'cases', 'messages', 'calendar', 'documents', 'billing', 'reports', 'comms', 'settings'].map(p =>
+      {['dashboard', 'leads', 'clients', 'cases', 'messages', 'calendar', 'documents', 'billing', 'reports', 'retainers', 'forms', 'chasing', 'precheck', 'comms', 'settings'].map(p =>
         <button key={p} style={btn} onClick={() => { setPage(p); setData(null); setErr('') }}>{p}</button>)}
     </div>
     {err && <p style={{ color: 'red' }}>{err}</p>}
@@ -99,6 +99,10 @@ function App() {
     {page === 'billing' && data && (<BillingPage token={token} invoices={data} refresh={() => api('/api/invoices', token).then(setData)} />)}
     {page === 'reports' && data && (<ReportsPage token={token} summary={data} />)}
     {page === 'messages' && data && (<MessagesPage token={token} cases={data} />)}
+    {page === 'retainers' && data && (<RetainersPage token={token} cases={data} />)}
+    {page === 'forms' && data && (<FormsPage token={token} cases={data} />)}
+    {page === 'chasing' && data && (<ChasingPage token={token} cases={data} />)}
+    {page === 'precheck' && data && (<PrecheckPage token={token} />)}
     {page === 'calendar' && data && (<CalendarPage token={token} consultations={data} />)}
     {page === 'comms' && data && (<CommsPage token={token} comms={data} />)}
     {page === 'leads' && data && (<Leads token={token} leads={data} refresh={() => api('/api/leads', token).then(setData)} />)}
@@ -507,6 +511,83 @@ function AssistantWidget({ token, cases }) {
     <button onClick={ask}>Ask</button></p>
     {turn && (<div><p>{turn.answer}</p>{turn.routed && <p><i>Routed to your consultant — please message the firm through the portal for this one.</i></p>}</div>)}
     {note && <p>{note}</p>}
+  </div>)
+}
+
+function RetainersPage({ token, cases }) {
+  const [caseId, setCaseId] = useState('')
+  const [list, setList] = useState([])
+  const [signer, setSigner] = useState('')
+  const [note, setNote] = useState('')
+  const load = async (id) => { if (!id) return; setList(await api(`/api/cases/${id}/retainers`, token)) }
+  const generate = async () => { try { await api(`/api/cases/${caseId}/retainers`, token, {}); await load(caseId); setNote('Retainer generated (draft).') } catch (e) { setNote(String(e)) } }
+  const sign = async (id) => { try { await api(`/api/retainers/${id}/sign`, token, { signer_name: signer }); await load(caseId); setNote('Retainer signed in-app (typed name + timestamp + audit row).') } catch (e) { setNote(String(e)) } }
+  return (<div><h2>Retainers</h2>{note && <p>{note}</p>}
+    <p><i>A case cannot leave its opening stage until its retainer is signed — enforced server-side. Signatures here are captured in-app (typed name); there is no third-party e-signature provider in this build.</i></p>
+    <p>Case: <select value={caseId} onChange={e => { setCaseId(e.target.value); load(e.target.value) }}><option value="">—</option>{cases.map(c => <option key={c.id} value={c.id}>#{c.id} {c.stream} · {c.stage}</option>)}</select>{' '}
+    <button disabled={!caseId} onClick={generate}>Generate retainer</button></p>
+    <ul>{list.map(r => <li key={r.id}>#{r.id} — {r.status}{r.signed_at ? ` · signed by ${r.signer_name} (${r.method}) at ${r.signed_at}` : ''}{' '}
+      {r.status === 'draft' && <span>Signer: <input value={signer} onChange={e => setSigner(e.target.value)} placeholder="Full name" /> <button onClick={() => sign(r.id)}>Sign in-app</button></span>}
+    </li>)}</ul>
+  </div>)
+}
+
+function FormsPage({ token, cases }) {
+  const [caseId, setCaseId] = useState('')
+  const [list, setList] = useState([])
+  const [code, setCode] = useState('IMM 0008')
+  const [detail, setDetail] = useState(null)
+  const [corr, setCorr] = useState('')
+  const [note, setNote] = useState('')
+  const load = async (id) => { if (!id) return; setList(await api(`/api/cases/${id}/ircc-forms`, token)) }
+  const generate = async () => { try { await api(`/api/cases/${caseId}/ircc-forms`, token, { form_code: code }); await load(caseId) } catch (e) { setNote(String(e)) } }
+  const open = async (id) => { setDetail(await api(`/api/ircc-forms/${id}`, token)) }
+  const correct = async () => { try { let c = {}; try { c = JSON.parse(corr || '{}') } catch { setNote('Corrections must be JSON, e.g. {"uci": "1234-5678"}'); return } await patch(`/api/ircc-forms/${detail.id}`, token, { corrections: c }); await load(caseId); setDetail(await api(`/api/ircc-forms/${detail.id}`, token)); setNote('Correction saved as a new version.') } catch (e) { setNote(String(e)) } }
+  return (<div><h2>IRCC forms</h2>{note && <p>{note}</p>}
+    <p><i>Structured form data + printable rendering — NOT official IRCC PDFs. Every consultant correction is a new version; nothing is ever submitted to IRCC by this system.</i></p>
+    <p>Case: <select value={caseId} onChange={e => { setCaseId(e.target.value); load(e.target.value); setDetail(null) }}><option value="">—</option>{cases.map(c => <option key={c.id} value={c.id}>#{c.id} {c.stream}</option>)}</select>{' '}
+    Form: <select value={code} onChange={e => setCode(e.target.value)}>{['IMM 0008', 'IMM 5669', 'IMM 5257', 'IMM 1294', 'IMM 5476'].map(f => <option key={f}>{f}</option>)}</select>{' '}
+    <button disabled={!caseId} onClick={generate}>Generate from case data</button></p>
+    <ul>{list.map(f => <li key={f.id}><button onClick={() => open(f.id)}>{f.form_code} v{f.version_no} ({f.status})</button></li>)}</ul>
+    {detail && (<div><h3>{detail.form_code} v{detail.version_no} ({detail.status})</h3><pre style={{ whiteSpace: 'pre-wrap', border: '1px solid #ccc', padding: 12 }}>{detail.rendering}</pre>
+    <p>Correct (JSON): <input value={corr} onChange={e => setCorr(e.target.value)} placeholder='{"uci": "1234-5678"}' style={{ width: '50%' }} /> <button onClick={correct}>Save as new version</button></p></div>)}
+  </div>)
+}
+
+function ChasingPage({ token, cases }) {
+  const [caseId, setCaseId] = useState('')
+  const [list, setList] = useState([])
+  const [note, setNote] = useState('')
+  const run = async () => { try { const r = await api('/api/jobs/run-chasing', token, {}); setNote(`Chasing run: ${r.chased} sent, ${r.skipped_recent} skipped (already chased within 7 days).`); if (caseId) setList(await api(`/api/cases/${caseId}/chases`, token)) } catch (e) { setNote(String(e)) } }
+  const load = async (id) => { if (!id) return; setList(await api(`/api/cases/${id}/chases`, token)) }
+  return (<div><h2>Document chasing</h2>{note && <p>{note}</p>}
+    <p><i>Missing items are chased automatically (log mode by default — nothing is delivered until the firm's sender is verified). Chasing stops when the item arrives and never repeats within 7 days per channel.</i></p>
+    <p><button onClick={run}>Run chasing job now</button>{' '}Case: <select value={caseId} onChange={e => { setCaseId(e.target.value); load(e.target.value) }}><option value="">—</option>{cases.map(c => <option key={c.id} value={c.id}>#{c.id} {c.stream}</option>)}</select></p>
+    <ul>{list.map(c => <li key={c.id}>Item #{c.checklist_item_id} · {c.channel} · {c.message_status} · {c.at}</li>)}</ul>
+  </div>)
+}
+
+function PrecheckPage({ token }) {
+  const [answers, setAnswers] = useState({ education: 'bachelor', language_clb: 7, work_years: 3, age_band: 'under-30', job_offer: false, family_in_canada: false, admission_letter: false, proof_of_funds: false, province_interest: '' })
+  const [result, setResult] = useState(null)
+  const [note, setNote] = useState('')
+  const set = (k, v) => setAnswers({ ...answers, [k]: v })
+  const run = async () => { try { setResult(await api('/api/staff/precheck', token, { answers })) } catch (e) { setNote(String(e)) } }
+  return (<div><h2>Eligibility pre-check</h2>{note && <p>{note}</p>}
+    <p><i>Rules-based triage only. It never decides eligibility, never promises an outcome, and never replaces the consultant's assessment. Every result carries the disclaimer.</i></p>
+    <p>Education: <select value={answers.education} onChange={e => set('education', e.target.value)}><option value="">—</option><option value="secondary">Secondary</option><option value="diploma">Diploma</option><option value="bachelor">Bachelor</option><option value="master_plus">Master or higher</option></select>{' '}
+    Language CLB: <input type="number" value={answers.language_clb} onChange={e => set('language_clb', Number(e.target.value))} style={{ width: 60 }} />{' '}
+    Work years: <input type="number" value={answers.work_years} onChange={e => set('work_years', Number(e.target.value))} style={{ width: 60 }} />{' '}
+    Age: <select value={answers.age_band} onChange={e => set('age_band', e.target.value)}><option value="">—</option><option value="under-30">Under 30</option><option value="30-40">30–40</option><option value="40-plus">40+</option></select></p>
+    <p><label><input type="checkbox" checked={answers.job_offer} onChange={e => set('job_offer', e.target.checked)} /> Job offer</label>{' '}
+    <label><input type="checkbox" checked={answers.family_in_canada} onChange={e => set('family_in_canada', e.target.checked)} /> Family in Canada</label>{' '}
+    <label><input type="checkbox" checked={answers.admission_letter} onChange={e => set('admission_letter', e.target.checked)} /> Admission letter</label>{' '}
+    <label><input type="checkbox" checked={answers.proof_of_funds} onChange={e => set('proof_of_funds', e.target.checked)} /> Proof of funds</label>{' '}
+    Province: <input value={answers.province_interest} onChange={e => set('province_interest', e.target.value)} placeholder="e.g. Ontario" /></p>
+    <p><button onClick={run}>Run pre-check</button></p>
+    {result && (<div><h3>Likely streams to explore</h3><ul>{result.ranked.map((r, i) => <li key={i}><b>{r.stream}</b> — {r.reasons.join('; ')}</li>)}</ul>
+    {result.ranked.length === 0 && <p>No strong match from these answers — book a consultation.</p>}
+    <p><i>{result.disclaimer}</i></p></div>)}
   </div>)
 }
 
