@@ -14,6 +14,8 @@ Endpoints (all tenant-scoped; branch-scoped for non-admin staff):
   jobs, action items, AI drafts, audit log).
   Phase 3 routes live in routers_phase3.py (document checklists, review
   queue, AI suggestions, submission packet, expiry alerts, client portal).
+  Phase 4 routes live in routers_phase4.py (billing, subscription,
+  deadline engine, reports, portal AI assistant).
 """
 from datetime import date
 from fastapi import FastAPI, Depends, HTTPException
@@ -26,15 +28,18 @@ from .models import Tenant, Branch, User, Lead, Client, Case, CaseStageEvent, St
 from . import auth, messaging, booking, documents
 from . import models_phase2  # noqa: F401 — registers Phase 2 tables for create_all
 from . import models_phase3  # noqa: F401 — registers Phase 3 tables for create_all
+from . import models_phase4  # noqa: F401 — registers Phase 4 tables for create_all
 from .routers_phase2 import router as phase2_router
 from .routers_phase3 import router as phase3_router
+from .routers_phase4 import router as phase4_router
 from .seed import seed as run_seed
 
 Base.metadata.create_all(bind=engine)
-app = FastAPI(title="Immigration Consultant CRM — Phase 3")
+app = FastAPI(title="Immigration Consultant CRM — Phase 4")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 app.include_router(phase2_router)
 app.include_router(phase3_router)
+app.include_router(phase4_router)
 if messaging.ALLOW_TEST_HOOKS:
     from .test_hooks import router as test_hooks_router
     app.include_router(test_hooks_router)
@@ -47,7 +52,7 @@ def startup():
 
 @app.get("/api/health")
 def health():
-    return {"status": "ok", "phase": 3}
+    return {"status": "ok", "phase": 4}
 
 
 # ---------- auth ----------
@@ -259,8 +264,15 @@ def client_360(client_id: int, user: User = Depends(auth.current_user), db: Sess
             Consultation.client_id == client.id).order_by(Consultation.starts_at).all()
     else:
         consultations = []
+    # Phase 4 (additive): invoices on the 360 view.
+    from .models_phase4 import Invoice as _Invoice
+    invoices = db.query(_Invoice).filter(
+        _Invoice.tenant_id == user.tenant_id,
+        _Invoice.client_id == client.id).order_by(_Invoice.id.desc()).all()
     return {"id": client.id, "full_name": client.full_name, "email": client.email,
             "phone": client.phone, "country_of_origin": client.country_of_origin,
+            "invoices": [{"id": i.id, "number": i.number, "total_cents": i.total_cents,
+                          "paid_cents": i.paid_cents, "status": i.status} for i in invoices],
             "cases": [case_out(c) for c in cases],
             "messages": [{"id": m.id, "channel": m.channel, "body": m.body,
                           "status": m.status, "at": str(m.created_at)} for m in messages],

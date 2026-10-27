@@ -172,14 +172,67 @@ listed as missing, not silently dropped).
 counts and the next deadline; portal documents show each item's
 status, rejection reasons, and the firm's messages (read-only).
 
+## Phase 4 — billing, deadline engine, reports, portal AI assistant (W9, W2 complete, W12 subscription, Section 6.2)
+
+**Billing (W9):** invoice templates with line items and an instalment
+plan (shares must sum to 1; the last instalment takes rounding
+remainder). Invoices number per firm (INV-0001, …), carry instalments
+with due dates, and move Draft → Sent → Partially Paid → Paid; the
+billing job flips past-due Sent/Partially Paid invoices to Overdue and
+sends one overdue reminder per invoice per day (log mode by default,
+via the Phase 2 adapters — no new senders). Payments record card,
+e-transfer, or cash with a per-firm receipt number (RCP-0001, …) and
+allocate oldest-pending-instalment-first; overpayments and payments on
+Draft invoices are refused. **Card payments are recorded, not
+charged:** live Stripe charging is NOT implemented — no Stripe
+credential exists anywhere in this repo, and the `STRIPE_SECRET_KEY`
+placeholder stays empty.
+
+**Subscription (W12):** one row per firm (plan starter/growth/scale,
+status trialing/active/past_due/cancelled, seats, dates), firm-admin
+only. Mechanics are deliberately simple: the design doc names
+subscription management but specifies no proration, trial, or dunning
+flow, and none is invented here.
+
+**Deadline engine:** firm rules derive deadlines from case creation,
+stage entry, or submission date (idempotent — a second run never
+duplicates an open deadline). The alert job sends 30/14/7-day alerts
+through the Phase 2 adapters (one per deadline per window, never
+repeated) and escalates overdue deadlines to a dashboard action item
+for the branch manager / firm admin (deduped while unresolved).
+
+**Reports (W2 complete):** approval rate by stream (decided cases with
+closure "Approved" over "Approved"+"Refused"; null, never 0%, when no
+case is decided), average days per stage from the timeline, workload
+(open cases per assignee), revenue by month (payments received +
+invoices issued). `GET /api/reports/export.xlsx` downloads a workbook
+(Summary, Revenue by month, Workload, Stage durations, Invoices,
+Payments) for the accountant.
+
+**Portal AI assistant (6.2):** the same template-adapter pattern as
+Phases 2/3 — no external model call, no data leaves the firm. It
+answers ONLY from the signed-in client's own case data (stage, next
+step, deadline, outstanding documents, appointments, invoices) and
+cites the fields used. Anything about eligibility, law, strategy, or
+likely outcomes — or anything it cannot answer from the case file —
+routes plainly to the consultant, and the turn is logged for staff
+review on the case. It never invents a fact: no deadline, no invoice,
+or no appointment is answered as such, not guessed.
+
+**Roles:** the design doc's Receptionist ("no access to billing
+internals") gets 403 on billing and report endpoints; subscription is
+firm-admin only. Branch scoping from Phase 1 still applies to billing
+rows.
+
 ## Acceptance-test checklist (actually run, Oct 27, 2026)
 
 Backend booted from `backend/` on a fresh SQLite file with
 `DEV_OTP=true`, `ALLOW_TEST_HOOKS=true`; `python scripts/smoke_test.py`
-(91 checks), `scripts/phase3_isolation_probe.py` (11 checks),
+(123 checks), `scripts/phase4_isolation_probe.py` (13 checks),
+`scripts/phase3_isolation_probe.py` (11 checks),
 `scripts/phase2_unit_checks.py` (10 checks), and `vite build` — all
-against the same build. Phase 1 + Phase 2 checks re-ran unchanged
-(health now reports phase 3).
+against the same build. Phase 1–3 checks re-ran unchanged
+(health now reports phase 4).
 
 | # | Check | Result |
 |---|-------|--------|
@@ -224,8 +277,18 @@ against the same build. Phase 1 + Phase 2 checks re-ran unchanged
 | 54 | Submission packet ZIP with manifest naming the approved Passport | PASS |
 | 55 | Token separation: portal token 401 on staff endpoints, staff token 401 on portal endpoints | PASS |
 | 56 | Isolation probe: Firm B sees nothing of Firm A documents; portal client sees nothing of another client's case (11 probe checks) | PASS |
+| 57 | Invoice template (shares must sum to 1) + invoice from template: number, total, 2 instalments, Draft; payment on Draft refused | PASS |
+| 58 | Invoice send Draft → Sent; partial payment → Partially Paid + receipt + first instalment paid; overpayment refused | PASS |
+| 59 | Billing job: past-due invoice → Overdue + one reminder, idempotent within the day; final payment reconciles to Paid, balance zero | PASS |
+| 60 | Client 360 view lists invoices; subscription defaults + firm-admin update; non-admin change refused (403) | PASS |
+| 61 | Deadline rule → derive creates one deadline, derive again creates none; 30-day alert fires once, never repeats | PASS |
+| 62 | Overdue deadline escalates to a dashboard action item, deduped while unresolved | PASS |
+| 63 | Reports summary has all four sections; revenue by month matches recorded payments; .xlsx export has all six sheets | PASS |
+| 64 | Portal assistant: status answer cites own stage, not routed; eligibility question routed to consultant; another client's case refused (404); staff review turns on the case | PASS |
+| 65 | Portal lists own invoices only; another client's invoice refused (404) | PASS |
+| 66 | Isolation probe: Firm B sees no Firm A billing/reports/subscription; receptionist 403 on billing/reports; portal/staff token separation (13 probe checks) | PASS |
 
-Total: 91 smoke + 11 isolation + 10 unit, 0 failed. Docker Compose was
+Total: 123 smoke + 13 + 11 isolation + 10 unit, 0 failed. Docker Compose was
 NOT run here (no Docker on the build machine) — it is provided
 following the proven platform pattern and needs one
 `docker compose up --build` on a Docker host before it counts as
@@ -252,10 +315,20 @@ verified.
   to end with no phone call; review queue empties top to bottom; an
   upload's proposed field values stay unsaved until consultant
   approval) — same deferred phase-by-phase testing.
+- The Phase 4 demo gate with Surath (an invoice is issued, partially
+  paid, reminded when overdue, and reconciled; an overdue deadline
+  escalates to the branch manager; a report exports to spreadsheet for
+  the accountant; a client asks the portal assistant about their own
+  case and gets an answer drawn from their case data, or a routing to
+  the consultant when the assistant does not know) — same deferred
+  phase-by-phase testing.
+- Live Stripe charging (card payments are recorded, not charged, in
+  this build) and any proration/trial/dunning subscription flow (the
+  design doc does not specify one).
 
 ## Phase gate
 
-Phase 3 is built and committed locally (not yet pushed — the parent
+Phase 4 is built and committed locally (not yet pushed — the parent
 pushes after verification). Testing is deferred: the user tests phase
 by phase later.
 

@@ -1,4 +1,4 @@
-"""Phase 1 + Phase 2 + Phase 3 acceptance smoke test. Boots nothing
+"""Phase 1 + Phase 2 + Phase 3 + Phase 4 acceptance smoke test. Boots nothing
 itself — run against a live backend (see README). Exits non-zero if
 any check fails.
 Usage: python scripts/smoke_test.py [BASE_URL]
@@ -48,7 +48,7 @@ def iso(dt):
 
 
 s, health = call("GET", "/api/health")
-check("health 200 + phase 3", s == 200 and health.get("phase") == 3, str(health))
+check("health 200 + phase 4", s == 200 and health.get("phase") == 4, str(health))
 
 s, otp = call("POST", "/api/auth/request-otp", body={"email": "admin@demo.example"})
 code = otp.get("dev_code")
@@ -563,6 +563,170 @@ s, q_bad = call("GET", "/api/review-queue", token=ptoken)
 check("P3 portal token cannot call staff endpoints (401)", s == 401, str(s))
 s, p_bad = call("GET", "/api/portal/cases", token=token)
 check("P3 staff token cannot call portal endpoints (401)", s == 401, str(s))
+
+# ---------- Phase 4: billing, deadline engine, reports, portal assistant ----------
+# W9: invoice template + invoice from template, numbering, instalments
+s, tmpl = call("POST", "/api/billing/templates", token, body={
+    "name": "Express Entry retainer", "currency": "CAD",
+    "line_items": [{"description": "Retainer", "amount_cents": 100000},
+                   {"description": "Filing fee", "amount_cents": 50000}],
+    "instalments": [{"offset_days": 0, "share": 0.5}, {"offset_days": 30, "share": 0.5}]})
+check("P4 invoice template created", s == 200 and tmpl.get("id"), str(tmpl))
+s, bad_tmpl = call("POST", "/api/billing/templates", token, body={
+    "name": "Bad shares",
+    "line_items": [{"description": "X", "amount_cents": 1000}],
+    "instalments": [{"offset_days": 0, "share": 0.5}, {"offset_days": 30, "share": 0.4}]})
+check("P4 template with shares != 1 rejected (400)", s == 400, str(bad_tmpl))
+s, inv = call("POST", f"/api/cases/{case_id}/invoices", token, body={
+    "template_id": tmpl["id"]})
+inv_id = inv.get("id")
+check("P4 invoice from template: number, total, 2 instalments, Draft",
+      s == 200 and inv.get("number", "").startswith("INV-")
+      and inv.get("total_cents") == 150000 and len(inv.get("instalments", [])) == 2
+      and inv.get("status") == "Draft", str(inv))
+s, inv_pay = call("POST", f"/api/invoices/{inv_id}/payments", token, body={
+    "method": "e-transfer", "amount_cents": 1000, "proof": "too early"})
+check("P4 payment on Draft invoice refused (400)", s == 400, str(inv_pay))
+s, sent = call("POST", f"/api/invoices/{inv_id}/send", token, body={})
+check("P4 invoice send: Draft -> Sent", s == 200 and sent.get("status") == "Sent", str(sent))
+s, pay1 = call("POST", f"/api/invoices/{inv_id}/payments", token, body={
+    "method": "e-transfer", "amount_cents": 75000, "proof": "ETR-001"})
+check("P4 partial payment -> Partially Paid + receipt + first instalment paid",
+      s == 200 and pay1.get("status") == "Partially Paid"
+      and pay1.get("paid_cents") == 75000
+      and pay1["payments"][0]["receipt_no"].startswith("RCP-")
+      and pay1["instalments"][0]["status"] == "paid"
+      and pay1["instalments"][1]["status"] == "pending", str(pay1))
+s, over = call("POST", f"/api/invoices/{inv_id}/payments", token, body={
+    "method": "cash", "amount_cents": 999999, "proof": "too much"})
+check("P4 overpayment refused (400)", s == 400, str(over))
+
+# W9 demo gate: issued, partially paid, reminded when overdue, reconciled
+past = (datetime.utcnow() - timedelta(days=5)).strftime("%Y-%m-%d")
+s, inv2 = call("POST", f"/api/cases/{case_id}/invoices", token, body={
+    "template_id": tmpl["id"], "due_date": past})
+inv2_id = inv2.get("id")
+call("POST", f"/api/invoices/{inv2_id}/send", token, body={})
+n_before_bill = len(case_msgs())
+s, job = call("POST", "/api/jobs/run-billing", token, body={})
+check("P4 billing job marks past-due invoice Overdue + reminds once",
+      s == 200 and job.get("overdue") == 1 and job.get("reminded") == 1, str(job))
+s, job2 = call("POST", "/api/jobs/run-billing", token, body={})
+check("P4 billing job is idempotent within the day (no second reminder)",
+      s == 200 and job2.get("reminded") == 0, str(job2))
+s, inv2_now = call("GET", f"/api/invoices/{inv2_id}", token)
+check("P4 overdue invoice reads back Overdue", s == 200 and inv2_now.get("status") == "Overdue", str(inv2_now))
+s, pay2 = call("POST", f"/api/invoices/{inv_id}/payments", token, body={
+    "method": "card", "amount_cents": 75000, "proof": "CARD-001"})
+check("P4 final payment reconciles invoice to Paid, balance zero",
+      s == 200 and pay2.get("status") == "Paid" and pay2.get("balance_cents") == 0
+      and pay2["instalments"][1]["status"] == "paid", str(pay2))
+s, pay3 = call("POST", f"/api/invoices/{inv2_id}/payments", token, body={
+    "method": "cash", "amount_cents": 150000, "proof": "CASH-001"})
+check("P4 overdue invoice paid in full by cash -> Paid",
+      s == 200 and pay3.get("status") == "Paid", str(pay3))
+s, view360 = call("GET", f"/api/clients/{client_id}", token)
+check("P4 client 360 view lists invoices",
+      s == 200 and any(i["number"] == inv["number"] for i in view360.get("invoices", [])),
+      str(view360.get("invoices")))
+
+# W12: platform subscription (firm-admin only, simple mechanics)
+s, sub = call("GET", "/api/settings/subscription", token)
+check("P4 subscription defaults exist (trialing/starter)", s == 200 and sub.get("status") == "trialing"
+      and sub.get("plan") == "starter", str(sub))
+# call() forces POST when a body is given, so PATCH needs patch_raw
+s, sub2 = patch_raw("/api/settings/subscription", token, {"plan": "growth", "status": "active"})
+check("P4 subscription plan/status updated by firm admin", s == 200 and sub2.get("plan") == "growth"
+      and sub2.get("status") == "active", str(sub2))
+s, cotp = call("POST", "/api/auth/request-otp", body={"email": "consultant@demo.example"})
+s, cauth = call("POST", "/api/auth/verify-otp", body={"email": "consultant@demo.example", "code": cotp.get("dev_code")})
+ctoken = cauth.get("token")
+s, sub_bad = patch_raw("/api/settings/subscription", ctoken, {"plan": "scale"})
+check("P4 non-admin cannot change subscription (403)", s == 403, str(sub_bad))
+
+# Deadline engine: rule -> derive (idempotent) -> 30/14/7 alerts -> escalation
+s, rule = call("POST", "/api/deadline-rules", token, body={
+    "name": "Submission follow-up", "trigger": "case_created", "offset_days": 30,
+    "deadline_type": "follow_up", "title": "Submission follow-up"})
+check("P4 deadline rule created", s == 200 and rule.get("id"), str(rule))
+s, der = call("POST", f"/api/cases/{case_id}/derive-deadlines", token, body={})
+check("P4 derive creates one deadline from the rule", s == 200 and der.get("created") == 1, str(der))
+s, der2 = call("POST", f"/api/cases/{case_id}/derive-deadlines", token, body={})
+check("P4 derive is idempotent (no duplicate)", s == 200 and der2.get("created") == 0, str(der2))
+due30 = datetime.utcnow() + timedelta(days=30)
+s, dl30 = call("POST", f"/api/cases/{case_id}/deadlines", token, body={
+    "title": "Thirty-day check", "due_date": iso(due30), "deadline_type": "general",
+    "remind_for": "both"})
+n_before_alert = len(case_msgs())
+s, alerts = call("POST", "/api/jobs/run-deadline-alerts", token, body={})
+check("P4 30-day alert fires once via log-mode messaging",
+      s == 200 and alerts.get("alerted", 0) >= 1, str(alerts))
+s, alerts2 = call("POST", "/api/jobs/run-deadline-alerts", token, body={})
+check("P4 deadline alerts do not repeat on re-run",
+      s == 200 and alerts2.get("alerted") == 0, str(alerts2))
+due_past = datetime.utcnow() - timedelta(days=2)
+s, dl_old = call("POST", f"/api/cases/{case_id}/deadlines", token, body={
+    "title": "Overdue test deadline", "due_date": iso(due_past), "deadline_type": "general",
+    "remind_for": "both"})
+s, esc = call("POST", "/api/jobs/run-deadline-alerts", token, body={})
+s, dash2 = call("GET", "/api/dashboard", token)
+check("P4 overdue deadline escalates to a dashboard action item",
+      s == 200 and esc.get("escalated", 0) >= 1
+      and any(a["kind"] == "deadline_escalation" for a in dash2.get("action_items", [])),
+      str(esc))
+s, esc2 = call("POST", "/api/jobs/run-deadline-alerts", token, body={})
+check("P4 escalation is deduped while unresolved", s == 200 and esc2.get("escalated") == 0, str(esc2))
+
+# W2 complete: reports + spreadsheet export
+s, rep = call("GET", "/api/reports/summary", token)
+check("P4 reports summary has all four sections",
+      s == 200 and "approval_rate_by_stream" in rep and "days_per_stage" in rep
+      and "workload" in rep and "revenue_by_month" in rep, str(sorted(rep.keys()) if isinstance(rep, dict) else rep))
+rev = next((r for r in rep.get("revenue_by_month", []) if r["payments"] > 0), None)
+check("P4 revenue by month counts the recorded payments",
+      rev is not None and rev["received_cents"] == 300000, str(rev))
+s, headers, data = call_raw("GET", "/api/reports/export.xlsx", token)
+import openpyxl as _oxl
+import io as _io2
+wb = None
+if s == 200 and data[:2] == b"PK":
+    wb = _oxl.load_workbook(_io2.BytesIO(data))
+check("P4 spreadsheet export is a valid .xlsx with all six sheets",
+      wb is not None and set(wb.sheetnames) == {"Summary", "Revenue by month", "Workload",
+      "Stage durations", "Invoices", "Payments"},
+      str(wb.sheetnames if wb else s))
+
+# Portal assistant (6.2): own data cited, law/eligibility routed, others' cases refused
+s, ask1 = call("POST", "/api/portal/assistant/ask", ptoken, body={
+    "question": "What is happening with my application?", "case_id": case_id})
+check("P4 assistant answers a status question from own case data, not routed",
+      s == 200 and ask1.get("routed") is False and "Documents" in ask1.get("answer", ""),
+      str(ask1))
+s, ask2 = call("POST", "/api/portal/assistant/ask", ptoken, body={
+    "question": "Am I eligible for Express Entry and what are my chances?"})
+check("P4 assistant routes eligibility questions to the consultant",
+      s == 200 and ask2.get("routed") is True and "consultant" in ask2.get("answer", "").lower(),
+      str(ask2))
+s, ask3 = call("POST", "/api/portal/assistant/ask", ptoken, body={
+    "question": "What is happening?", "case_id": 999999})
+check("P4 assistant refuses a case that is not the client's (404)", s == 404, str(ask3))
+s, turns = call("GET", f"/api/cases/{case_id}/assistant-turns", token)
+check("P4 staff can review assistant turns on the case",
+      s == 200 and len(turns) >= 2 and any(t["routed"] for t in turns), str(turns))
+
+# Portal invoices: own only
+s, pinv = call("GET", "/api/portal/invoices", ptoken)
+check("P4 portal lists the client's own invoices",
+      s == 200 and any(i["number"] == inv["number"] for i in pinv), str(pinv))
+s, lead2 = call("POST", "/api/leads", token, body={
+    "full_name": "Other Person", "email": "other@example.com", "source": "Website",
+    "stream_of_interest": "Study", "stage": "New"})
+s, conv2 = call("POST", f"/api/leads/{lead2['id']}/convert", token)
+other_case = conv2["case"]["id"]
+s, inv_other = call("POST", f"/api/cases/{other_case}/invoices", token, body={
+    "line_items": [{"description": "Fee", "amount_cents": 1000}]})
+s, pinv_bad = call("GET", f"/api/portal/invoices/{inv_other['id']}", ptoken)
+check("P4 portal cannot open another client's invoice (404)", s == 404, str(pinv_bad))
 
 print(f"\n{len(passed)} passed, {len(failed)} failed")
 if failed:

@@ -66,7 +66,7 @@ function App() {
   }, [token])
   useEffect(() => {
     if (!token) return
-    const path = page === 'dashboard' ? '/api/dashboard' : page === 'leads' ? '/api/leads' : page === 'clients' ? '/api/clients' : page === 'cases' ? '/api/cases' : page === 'messages' ? '/api/cases' : page === 'calendar' ? '/api/consultations' : page === 'comms' ? '/api/settings/communications' : page === 'documents' ? '/api/review-queue' : '/api/settings'
+    const path = page === 'dashboard' ? '/api/dashboard' : page === 'leads' ? '/api/leads' : page === 'clients' ? '/api/clients' : page === 'cases' ? '/api/cases' : page === 'messages' ? '/api/cases' : page === 'calendar' ? '/api/consultations' : page === 'comms' ? '/api/settings/communications' : page === 'documents' ? '/api/review-queue' : page === 'billing' ? '/api/invoices' : page === 'reports' ? '/api/reports/summary' : '/api/settings'
     api(path, token).then(setData).catch(e => setErr(String(e)))
   }, [token, page])
   if (portalToken) return <PortalApp token={portalToken} onSignOut={() => { localStorage.removeItem('icrm_portal_token'); setPortalToken(null); setPortal(false) }} />
@@ -80,7 +80,7 @@ function App() {
       <span>{me ? `${me.full_name} (${me.role}) — ${me.tenant}` : ''} <button onClick={() => { localStorage.removeItem('icrm_token'); setToken(null) }}>Sign out</button></span>
     </div>
     <div style={{ marginBottom: 16 }}>
-      {['dashboard', 'leads', 'clients', 'cases', 'messages', 'calendar', 'documents', 'comms', 'settings'].map(p =>
+      {['dashboard', 'leads', 'clients', 'cases', 'messages', 'calendar', 'documents', 'billing', 'reports', 'comms', 'settings'].map(p =>
         <button key={p} style={btn} onClick={() => { setPage(p); setData(null); setErr('') }}>{p}</button>)}
     </div>
     {err && <p style={{ color: 'red' }}>{err}</p>}
@@ -96,6 +96,8 @@ function App() {
       <h3>Upcoming consultations</h3><ul>{(data.upcoming_consultations || []).map(c => <li key={c.id}>{c.starts_at} — {c.kind} ({c.status})</li>)}</ul>
     </div>)}
     {page === 'documents' && data && (<DocumentsPage token={token} />)}
+    {page === 'billing' && data && (<BillingPage token={token} invoices={data} refresh={() => api('/api/invoices', token).then(setData)} />)}
+    {page === 'reports' && data && (<ReportsPage token={token} summary={data} />)}
     {page === 'messages' && data && (<MessagesPage token={token} cases={data} />)}
     {page === 'calendar' && data && (<CalendarPage token={token} consultations={data} />)}
     {page === 'comms' && data && (<CommsPage token={token} comms={data} />)}
@@ -104,7 +106,8 @@ function App() {
     {page === 'cases' && data && (<div><h2>Cases</h2><ul>{data.map(c => <li key={c.id}>Case #{c.id} — {c.stream} · {c.stage} · File {c.ircc_file_number || '—'}</li>)}</ul></div>)}
     {page === 'settings' && data && (<div><h2>Settings</h2><p>Firm: {data.firm}</p>
       <h3>Branches</h3><ul>{data.branches.map(b => <li key={b.id}>{b.name} ({b.city})</li>)}</ul>
-      <h3>Team</h3><ul>{data.team.map(u => <li key={u.id}>{u.full_name} — {u.role} — {u.email}</li>)}</ul></div>)}
+      <h3>Team</h3><ul>{data.team.map(u => <li key={u.id}>{u.full_name} — {u.role} — {u.email}</li>)}</ul>
+      <SubscriptionBlock token={token} /></div>)}
   </div>)
 }
 
@@ -390,6 +393,7 @@ function PortalApp({ token, onSignOut }) {
       <span>{me ? me.full_name : ''} <button onClick={onSignOut}>Sign out</button></span>
     </div>
     {note && <p>{note}</p>}
+    <AssistantWidget token={token} cases={cases} />
     <h2>Your cases</h2>
     <ul>{cases.map(c => <li key={c.id}>
       <button onClick={() => open(c.id)}>Case #{c.id} — {c.stream} · {c.stage}</button>{' '}
@@ -410,6 +414,99 @@ function PortalApp({ token, onSignOut }) {
       <h3>Messages from the firm</h3>
       <ul>{detail.messages.map((m, i) => <li key={i}>[{m.channel}] {m.body} ({m.status})</li>)}</ul>
     </div>)}
+  </div>)
+}
+
+function BillingPage({ token, invoices, refresh }) {
+  const [templates, setTemplates] = useState([])
+  const [cases, setCases] = useState([])
+  const [caseId, setCaseId] = useState('')
+  const [templateId, setTemplateId] = useState('')
+  const [due, setDue] = useState('')
+  const [pay, setPay] = useState({})
+  const [note, setNote] = useState('')
+  useEffect(() => {
+    api('/api/billing/templates', token).then(setTemplates).catch(e => setNote(String(e)))
+    api('/api/cases', token).then(setCases).catch(e => setNote(String(e)))
+  }, [token])
+  const create = async () => {
+    try {
+      await api(`/api/cases/${caseId}/invoices`, token, { template_id: templateId ? Number(templateId) : null, due_date: due || null })
+      setNote('Invoice created.'); refresh()
+    } catch (e) { setNote(String(e)) }
+  }
+  const send = async (id) => { await api(`/api/invoices/${id}/send`, token, {}); refresh() }
+  const record = async (id) => {
+    const p = pay[id] || {}
+    await api(`/api/invoices/${id}/payments`, token, { method: p.method || 'e-transfer', amount_cents: Math.round(Number(p.amount || 0) * 100), proof: p.proof || '' })
+    refresh()
+  }
+  return (<div><h2>Billing</h2>{note && <p>{note}</p>}
+    <h3>New invoice from template</h3>
+    <p>Case: <select value={caseId} onChange={e => setCaseId(e.target.value)}><option value="">—</option>{cases.map(c => <option key={c.id} value={c.id}>#{c.id} {c.stream}</option>)}</select>{' '}
+    Template: <select value={templateId} onChange={e => setTemplateId(e.target.value)}><option value="">—</option>{templates.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}</select>{' '}
+    Due: <input type="date" value={due} onChange={e => setDue(e.target.value)} />{' '}
+    <button onClick={create}>Create</button></p>
+    <ul>{invoices.map(inv => <li key={inv.id}>
+      <b>{inv.number}</b> — ${inv.total_cents / 100} · paid ${inv.paid_cents / 100} · {inv.status}
+      {inv.status === 'Draft' && <button onClick={() => send(inv.id)}>Send</button>}
+      <span> · Pay: <select value={(pay[inv.id] || {}).method || 'e-transfer'} onChange={e => setPay({ ...pay, [inv.id]: { ...(pay[inv.id] || {}), method: e.target.value } })}><option>e-transfer</option><option>card</option><option>cash</option></select>{' '}
+      $<input size={8} value={(pay[inv.id] || {}).amount || ''} onChange={e => setPay({ ...pay, [inv.id]: { ...(pay[inv.id] || {}), amount: e.target.value } })} />{' '}
+      proof <input size={12} value={(pay[inv.id] || {}).proof || ''} onChange={e => setPay({ ...pay, [inv.id]: { ...(pay[inv.id] || {}), proof: e.target.value } })} />{' '}
+      <button onClick={() => record(inv.id)}>Record payment</button></span>
+    </li>)}</ul>
+    <p><i>Payments are recorded, not charged — card, e-transfer, and cash all record the same way.</i></p>
+  </div>)
+}
+
+function ReportsPage({ token, summary }) {
+  const download = async () => {
+    const r = await fetch('/api/reports/export.xlsx', { headers: { Authorization: `Bearer ${token}` } })
+    const blob = await r.blob()
+    const a = document.createElement('a')
+    a.href = URL.createObjectURL(blob); a.download = 'reports.xlsx'; a.click()
+  }
+  return (<div><h2>Reports</h2>
+    <p><button onClick={download}>Download spreadsheet for the accountant (.xlsx)</button></p>
+    <h3>Approval rate by stream</h3><ul>{Object.entries(summary.approval_rate_by_stream || {}).map(([s, r]) => <li key={s}>{s}: {r.rate === null ? 'n/a (no decided cases)' : `${Math.round(r.rate * 100)}%`} ({r.approved} approved / {r.refused} refused of {r.decided} decided)</li>)}</ul>
+    <h3>Workload</h3><ul>{(summary.workload || []).map((w, i) => <li key={i}>{w.assignee}: {w.open_cases} open cases</li>)}</ul>
+    <h3>Revenue by month</h3><ul>{(summary.revenue_by_month || []).map((r, i) => <li key={i}>{r.month}: received ${r.received_cents / 100} ({r.payments} payments) · invoiced ${r.invoiced_cents / 100} ({r.invoices} invoices)</li>)}</ul>
+    <h3>Days per stage</h3><ul>{(summary.days_per_stage || []).map((d, i) => <li key={i}>{d.stream} · {d.stage}: {d.avg_days} days avg ({d.cases} cases)</li>)}</ul>
+  </div>)
+}
+
+function SubscriptionBlock({ token }) {
+  const [sub, setSub] = useState(null)
+  const [note, setNote] = useState('')
+  const [plan, setPlan] = useState('starter')
+  const [status, setStatus] = useState('active')
+  useEffect(() => { api('/api/settings/subscription', token).then(s => { setSub(s); setPlan(s.plan); setStatus(s.status) }).catch(e => setNote(String(e))) }, [token])
+  const save = async () => { try { setSub(await patch('/api/settings/subscription', token, { plan, status })) } catch (e) { setNote(String(e)) } }
+  if (!sub) return (<div><h3>Platform subscription</h3>{note && <p>{note}</p>}<p>Loading… (firm admin only)</p></div>)
+  return (<div><h3>Platform subscription</h3>
+    <p>Plan: {sub.plan} · Status: {sub.status} · Seats: {sub.seats} · Renews: {sub.renews_on || '—'}</p>
+    <p>Plan: <select value={plan} onChange={e => setPlan(e.target.value)}><option>starter</option><option>growth</option><option>scale</option></select>{' '}
+    Status: <select value={status} onChange={e => setStatus(e.target.value)}><option>active</option><option>trialing</option><option>past_due</option><option>cancelled</option></select>{' '}
+    <button onClick={save}>Save</button></p>{note && <p>{note}</p>}
+  </div>)
+}
+
+function AssistantWidget({ token, cases }) {
+  const [question, setQuestion] = useState('')
+  const [caseId, setCaseId] = useState('')
+  const [turn, setTurn] = useState(null)
+  const [note, setNote] = useState('')
+  const ask = async () => {
+    try { setTurn(await api('/api/portal/assistant/ask', token, { question, case_id: caseId ? Number(caseId) : null })) } catch (e) { setNote(String(e)) }
+  }
+  return (<div style={{ border: '1px solid #ccc', padding: 12, marginBottom: 16 }}>
+    <h2>Ask about my case</h2>
+    <p><i>Answers come only from your own case file. Anything about eligibility, law, or likely outcomes goes to your consultant.</i></p>
+    <p>Case: <select value={caseId} onChange={e => setCaseId(e.target.value)}><option value="">— first case —</option>{cases.map(c => <option key={c.id} value={c.id}>#{c.id} {c.stream}</option>)}</select></p>
+    <p><input value={question} onChange={e => setQuestion(e.target.value)} placeholder="e.g. What is happening with my application?" style={{ width: '70%', padding: 8 }} />{' '}
+    <button onClick={ask}>Ask</button></p>
+    {turn && (<div><p>{turn.answer}</p>{turn.routed && <p><i>Routed to your consultant — please message the firm through the portal for this one.</i></p>}</div>)}
+    {note && <p>{note}</p>}
   </div>)
 }
 
