@@ -71,7 +71,12 @@ def current_user(creds: HTTPAuthorizationCredentials = Depends(bearer), db: Sess
         payload = jwt.decode(creds.credentials, SECRET_KEY, algorithms=[ALGORITHM])
     except JWTError:
         raise HTTPException(status_code=401, detail="Invalid token")
-    user = db.query(User).filter(User.id == int(payload["sub"])).first()
+    try:
+        user_id = int(payload["sub"])
+    except (ValueError, TypeError):
+        # Portal tokens (sub "client:<id>") are not staff tokens.
+        raise HTTPException(status_code=401, detail="Invalid token")
+    user = db.query(User).filter(User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=401, detail="Unknown user")
     return user

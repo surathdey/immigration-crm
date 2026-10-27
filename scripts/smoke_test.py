@@ -1,10 +1,13 @@
-"""Phase 1 + Phase 2 acceptance smoke test. Boots nothing itself — run
-against a live backend (see README). Exits non-zero if any check fails.
+"""Phase 1 + Phase 2 + Phase 3 acceptance smoke test. Boots nothing
+itself — run against a live backend (see README). Exits non-zero if
+any check fails.
 Usage: python scripts/smoke_test.py [BASE_URL]
 
-Phase 2 checks run in log mode (the default): 'would send' records are
-the proof, and no real message is delivered to any phone or inbox.
+Phase 2/3 checks run in log mode (the default): 'would send' records
+are the proof, and no real message is delivered to any phone or inbox.
 Failure-injection checks need ALLOW_TEST_HOOKS=true on the backend.
+Phase 3 uploads are small text files (readable by the template AI
+adapter); binary uploads produce no suggestions, by design.
 """
 import json
 import sys
@@ -45,7 +48,7 @@ def iso(dt):
 
 
 s, health = call("GET", "/api/health")
-check("health 200 + phase 2", s == 200 and health.get("phase") == 2, str(health))
+check("health 200 + phase 3", s == 200 and health.get("phase") == 3, str(health))
 
 s, otp = call("POST", "/api/auth/request-otp", body={"email": "admin@demo.example"})
 code = otp.get("dev_code")
@@ -318,6 +321,248 @@ check("F17 draft discard works", s == 200 and discarded.get("status") == "discar
 s, audit = call("GET", "/api/audit-log", token=token)
 check("audit trail records Phase 2 actions", s == 200 and any(
     a["action"] in ("message_sent", "draft_approved", "consultation_booked") for a in audit), str(len(audit)))
+
+# ---------- Phase 3: documents + client portal ----------
+import uuid as _uuid
+
+
+def upload_file(path, token, filename, content, content_type="text/plain"):
+    boundary = _uuid.uuid4().hex
+    head = (f"--{boundary}\r\n"
+            f'Content-Disposition: form-data; name="file"; filename="{filename}"\r\n'
+            f"Content-Type: {content_type}\r\n\r\n").encode()
+    tail = f"\r\n--{boundary}--\r\n".encode()
+    req = urllib.request.Request(BASE + path, method="POST", data=head + content + tail,
+                                 headers={"Content-Type": f"multipart/form-data; boundary={boundary}",
+                                          "Authorization": f"Bearer {token}"})
+    try:
+        with urllib.request.urlopen(req) as r:
+            return r.status, json.loads(r.read() or b"{}")
+    except urllib.error.HTTPError as e:
+        raw = e.read()
+        try:
+            return e.code, json.loads(raw or b"{}")
+        except Exception:
+            return e.code, {"detail": raw.decode(errors="replace")}
+
+
+def call_raw(method, path, token):
+    req = urllib.request.Request(BASE + path, method=method,
+                                 headers={"Authorization": f"Bearer {token}"} if token else {})
+    try:
+        with urllib.request.urlopen(req) as r:
+            return r.status, dict(r.headers), r.read()
+    except urllib.error.HTTPError as e:
+        return e.code, dict(e.headers), e.read()
+
+
+def patch_raw(path, token, body):
+    # call() forces POST when a body is given, so PATCH needs raw urllib.
+    req = urllib.request.Request(BASE + path, method="PATCH",
+                                 data=json.dumps(body).encode(),
+                                 headers={"Content-Type": "application/json",
+                                          "Authorization": f"Bearer {token}"})
+    try:
+        with urllib.request.urlopen(req) as r:
+            return r.status, json.loads(r.read() or b"{}")
+    except urllib.error.HTTPError as e:
+        return e.code, json.loads(e.read() or b"{}")
+
+
+def checklist():
+    s, rows = call("GET", f"/api/cases/{case_id}/checklist", token)
+    return rows if isinstance(rows, list) else []
+
+
+def item_named(name):
+    return next((it for it in checklist() if it["document_name"] == name), None)
+
+
+def suggestions_of(item):
+    lv = (item or {}).get("latest_version") or {}
+    return lv.get("suggestions", [])
+
+
+# Checklist init from the stream template (seed case: Express Entry)
+s, items = call("POST", f"/api/cases/{case_id}/checklist/init", token, body={})
+check("P3 checklist init from stream template: 5 items, all Not Started",
+      s == 200 and len(items) == 5
+      and [i["document_name"] for i in items] == ["Passport", "IELTS result", "ECA report",
+                                                  "Police clearance", "Proof of funds"]
+      and all(i["status"] == "Not Started" for i in items), str(items))
+s, items2 = call("POST", f"/api/cases/{case_id}/checklist/init", token, body={})
+check("P3 checklist init is idempotent (no duplicates)",
+      s == 200 and len(items2) == 5, str(len(items2) if isinstance(items2, list) else items2))
+passport = item_named("Passport")
+n_msgs = len(case_msgs())
+s, req_item = call("POST", f"/api/checklist-items/{passport['id']}/request", token, body={})
+check("P3 staff requests a document: Requested + log-mode notification recorded",
+      s == 200 and req_item.get("status") == "Requested"
+      and len(case_msgs()) > n_msgs, str(req_item))
+
+# Portal sign-in (W10): OTP by email, firm-scoped
+s, potp = call("POST", "/api/portal/request-otp",
+               body={"identifier": "aisha@example.com", "firm_slug": "demo-firm"})
+pcode = potp.get("dev_code")
+check("P3 portal OTP issued in dev mode", s == 200 and bool(pcode), str(potp))
+s, pauth = call("POST", "/api/portal/verify-otp",
+                body={"identifier": "aisha@example.com", "firm_slug": "demo-firm", "code": pcode})
+ptoken = pauth.get("token")
+check("P3 portal OTP verify returns a portal JWT", s == 200 and bool(ptoken), str(pauth))
+s, pme = call("GET", "/api/portal/me", token=ptoken)
+check("P3 portal me shows only the client's own cases",
+      s == 200 and pme.get("full_name") == "Aisha Khan"
+      and any(c["id"] == case_id for c in pme.get("cases", [])), str(pme))
+s, pcases = call("GET", "/api/portal/cases", token=ptoken)
+pcase = next((c for c in pcases if c["id"] == case_id), None)
+check("P3 portal home lists the case with checklist counts",
+      s == 200 and pcase and pcase["checklist_counts"].get("Requested") == 1, str(pcase))
+s, pdetail = call("GET", f"/api/portal/cases/{case_id}", token=ptoken)
+check("P3 portal case detail shows the Requested item",
+      s == 200 and any(i["document_name"] == "Passport" and i["status"] == "Requested"
+                       for i in pdetail.get("checklist", [])), str(pdetail))
+
+# Demo gate, step 1: client uploads in the portal (W11)
+doc_v1 = b"Name: Aisha Khan\nUCI: 9999-8888\nExpiry: 2030-05-01\n"
+s, v1 = upload_file(f"/api/portal/cases/{case_id}/checklist/{passport['id']}/upload",
+                    ptoken, "passport.txt", doc_v1)
+check("P3 client uploads in portal: version 1 created, item Uploaded",
+      s == 200 and v1.get("version_no") == 1
+      and item_named("Passport")["status"] == "Uploaded", str(v1))
+sugs = suggestions_of(item_named("Passport"))
+check("P3 upload produces AI proposals (expiry + UCI) that stay Pending",
+      any(s["proposed_field"] == "expiry_date" and s["proposed_value"] == "2030-05-01"
+          and s["status"] == "Pending" for s in sugs)
+      and any(s["proposed_field"] == "uci" and s["proposed_value"] == "9999-8888"
+              and s["status"] == "Pending" for s in sugs), str(sugs))
+check("P3 proposals are NOT applied yet (item expiry null, case UCI unchanged)",
+      item_named("Passport")["expiry_date"] is None
+      and call("GET", f"/api/cases/{case_id}", token)[1].get("uci") == "1234-5678",
+      str(item_named("Passport")))
+
+# Demo gate, step 2: staff review queue -> reject with reason
+s, queue = call("GET", "/api/review-queue", token)
+check("P3 review queue holds the uploaded item (oldest first)",
+      s == 200 and any(q["id"] == passport["id"] for q in queue), str(len(queue)))
+s, reviewing = call("POST", f"/api/checklist-items/{passport['id']}/start-review", token, body={})
+check("P3 staff starts review: Under Review", s == 200 and reviewing.get("status") == "Under Review",
+      str(reviewing))
+s, bad_reject = call("POST", f"/api/checklist-items/{passport['id']}/reject", token, body={"reason": "  "})
+check("P3 reject without a reason is refused", s == 400, str(bad_reject))
+s, rejected = call("POST", f"/api/checklist-items/{passport['id']}/reject", token,
+                   body={"reason": "Blurry scan, please re-upload a clear copy"})
+check("P3 staff rejects with reason: Rejected + reason stored",
+      s == 200 and rejected.get("status") == "Rejected"
+      and rejected.get("rejection_reason") == "Blurry scan, please re-upload a clear copy",
+      str(rejected))
+s, pdetail = call("GET", f"/api/portal/cases/{case_id}", token=ptoken)
+p_passport = next((i for i in pdetail["checklist"] if i["document_name"] == "Passport"), None)
+check("P3 client sees the rejection reason in the portal",
+      p_passport and p_passport["status"] == "Rejected"
+      and "Blurry scan" in p_passport["rejection_reason"], str(p_passport))
+
+# Demo gate, step 3: client re-uploads, staff approves, queue empties
+s, v2 = upload_file(f"/api/portal/cases/{case_id}/checklist/{passport['id']}/upload",
+                    ptoken, "passport-clear.txt", doc_v1)
+check("P3 client re-uploads: version 2, item back to Uploaded",
+      s == 200 and v2.get("version_no") == 2
+      and item_named("Passport")["status"] == "Uploaded", str(v2))
+s, versions = call("GET", f"/api/checklist-items/{passport['id']}/versions", token)
+check("P3 version history keeps both versions with their decisions",
+      s == 200 and len(versions) == 2
+      and versions[0]["review_decision"] == "rejected"
+      and versions[1]["review_decision"] == "pending", str(versions))
+s, approved = call("POST", f"/api/checklist-items/{passport['id']}/approve", token, body={})
+check("P3 staff approves: Approved", s == 200 and approved.get("status") == "Approved", str(approved))
+s, queue = call("GET", "/api/review-queue", token)
+check("P3 review queue empties for the approved item",
+      s == 200 and not any(q["id"] == passport["id"] for q in queue), str(len(queue)))
+s, again = call("POST", f"/api/checklist-items/{passport['id']}/approve", token, body={})
+check("P3 approving an Approved item is refused", s == 400, str(again))
+
+# Demo gate, step 4: AI proposals apply ONLY on consultant approval
+sugs = suggestions_of(item_named("Passport"))
+exp_sug = next((s for s in sugs if s["proposed_field"] == "expiry_date"
+                and s["status"] == "Pending"), None)
+uci_sug = next((s for s in sugs if s["proposed_field"] == "uci"
+                and s["status"] == "Pending"), None)
+check("P3 pending proposals found on the approved version",
+      bool(exp_sug and uci_sug), str(sugs))
+s, dec = call("POST", f"/api/suggestions/{exp_sug['id']}/approve", token, body={})
+check("P3 approving the expiry proposal writes it to the item",
+      s == 200 and dec.get("status") == "Approved"
+      and item_named("Passport")["expiry_date"] == "2030-05-01", str(dec))
+s, dec2 = call("POST", f"/api/suggestions/{uci_sug['id']}/approve", token, body={})
+check("P3 approving the UCI proposal writes it to the case",
+      s == 200 and dec2.get("status") == "Approved"
+      and call("GET", f"/api/cases/{case_id}", token)[1].get("uci") == "9999-8888", str(dec2))
+s, dec3 = call("POST", f"/api/suggestions/{exp_sug['id']}/approve", token, body={})
+check("P3 a decided suggestion cannot be decided twice", s == 400, str(dec3))
+
+# Mismatch flag: document name differs from the file -> acknowledged, never written
+ielts = item_named("IELTS result")
+s, v3 = upload_file(f"/api/portal/cases/{case_id}/checklist/{ielts['id']}/upload",
+                    ptoken, "ielts.txt", b"Name: Aisha Khanne\nScore: 8.0\n")
+mm = next((s for s in suggestions_of(item_named("IELTS result"))
+           if s["kind"] == "mismatch" and s["proposed_field"] == "name_mismatch"), None)
+check("P3 name mismatch flagged as a Pending mismatch suggestion",
+      s == 200 and bool(mm), str(suggestions_of(item_named("IELTS result"))))
+s, dec4 = call("POST", f"/api/suggestions/{mm['id']}/reject", token, body={})
+s, view = call("GET", f"/api/clients/{client_id}", token)
+check("P3 dismissing a mismatch changes no client data",
+      s == 200 and dec4.get("status") == "Rejected"
+      and view.get("full_name") == "Aisha Khan", str(dec4))
+
+# Staff upload path + downloads
+police = item_named("Police clearance")
+s, v4 = upload_file(f"/api/checklist-items/{police['id']}/upload",
+                    token, "police.txt", b"Police clearance certificate\n")
+check("P3 staff upload works (Uploaded, staff as uploader)",
+      s == 200 and v4.get("uploaded_by_kind") == "staff"
+      and item_named("Police clearance")["status"] == "Uploaded", str(v4))
+s, headers, data = call_raw("GET", f"/api/documents/versions/{v4['id']}/download", token)
+check("P3 staff download returns the uploaded bytes",
+      s == 200 and data == b"Police clearance certificate\n", f"status={s} len={len(data)}")
+s, headers, data = call_raw("GET", f"/api/portal/cases/{case_id}/documents/{v4['id']}/download", ptoken)
+check("P3 portal download of own document works",
+      s == 200 and data == b"Police clearance certificate\n", f"status={s} len={len(data)}")
+
+# Expiry alerts + packet
+eca = item_named("ECA report")
+s, patched = patch_raw(f"/api/checklist-items/{eca['id']}", token, {"expiry_date": "2020-01-01"})
+check("P3 staff sets an expiry date on an item",
+      s == 200 and patched.get("expiry_date") == "2020-01-01", str(patched))
+n_before = len(case_msgs())
+s, job = call("POST", "/api/jobs/run-expiry-alerts", token, body={})
+check("P3 expiry job flips past-expiry items to Expired + notifies",
+      s == 200 and job.get("expired") == 1
+      and item_named("ECA report")["status"] == "Expired", str(job))
+soon = (datetime.utcnow() + timedelta(days=10)).strftime("%Y-%m-%d")
+s, patched2 = patch_raw(f"/api/checklist-items/{police['id']}", token, {"expiry_date": soon})
+s, job2 = call("POST", "/api/jobs/run-expiry-alerts", token, body={})
+s, expiring = call("GET", "/api/documents/expiring", token)
+n_after = len(case_msgs())
+s, job3 = call("POST", "/api/jobs/run-expiry-alerts", token, body={})
+check("P3 expiring-soon item alerts once (no duplicate on re-run)",
+      s == 200 and job2.get("alerted") == 1
+      and any(e["id"] == police["id"] for e in expiring)
+      and len(case_msgs()) == n_after, str(job2))
+import zipfile as _zf
+import io as _io
+s, headers, data = call_raw("GET", f"/api/cases/{case_id}/packet", token)
+ok_zip = s == 200 and data[:2] == b"PK"
+manifest = ""
+if ok_zip:
+    with _zf.ZipFile(_io.BytesIO(data)) as zf:
+        manifest = zf.read("manifest.txt").decode(errors="replace")
+check("P3 submission packet is a ZIP with a manifest naming the approved Passport",
+      ok_zip and "INCLUDED: Passport" in manifest, manifest[:300])
+
+# Token separation: portal tokens are not staff tokens and vice versa
+s, q_bad = call("GET", "/api/review-queue", token=ptoken)
+check("P3 portal token cannot call staff endpoints (401)", s == 401, str(s))
+s, p_bad = call("GET", "/api/portal/cases", token=token)
+check("P3 staff token cannot call portal endpoints (401)", s == 401, str(s))
 
 print(f"\n{len(passed)} passed, {len(failed)} failed")
 if failed:

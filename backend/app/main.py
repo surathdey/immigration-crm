@@ -1,4 +1,4 @@
-"""Immigration Consultant CRM — Phase 1 API + Phase 2 routes.
+"""Immigration Consultant CRM — Phase 1 API + Phase 2/3 routes.
 
 Endpoints (all tenant-scoped; branch-scoped for non-admin staff):
   GET  /api/health
@@ -12,6 +12,8 @@ Endpoints (all tenant-scoped; branch-scoped for non-admin staff):
   Phase 2 routes live in routers_phase2.py (comms settings, messages,
   event types, consultations, calendar week view + webhooks, deadlines,
   jobs, action items, AI drafts, audit log).
+  Phase 3 routes live in routers_phase3.py (document checklists, review
+  queue, AI suggestions, submission packet, expiry alerts, client portal).
 """
 from datetime import date
 from fastapi import FastAPI, Depends, HTTPException
@@ -21,15 +23,18 @@ from sqlalchemy.orm import Session
 
 from .db import get_db, engine, Base
 from .models import Tenant, Branch, User, Lead, Client, Case, CaseStageEvent, StreamTemplate, LEAD_STAGES
-from . import auth, messaging, booking
+from . import auth, messaging, booking, documents
 from . import models_phase2  # noqa: F401 — registers Phase 2 tables for create_all
+from . import models_phase3  # noqa: F401 — registers Phase 3 tables for create_all
 from .routers_phase2 import router as phase2_router
+from .routers_phase3 import router as phase3_router
 from .seed import seed as run_seed
 
 Base.metadata.create_all(bind=engine)
-app = FastAPI(title="Immigration Consultant CRM — Phase 2")
+app = FastAPI(title="Immigration Consultant CRM — Phase 3")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 app.include_router(phase2_router)
+app.include_router(phase3_router)
 if messaging.ALLOW_TEST_HOOKS:
     from .test_hooks import router as test_hooks_router
     app.include_router(test_hooks_router)
@@ -42,7 +47,7 @@ def startup():
 
 @app.get("/api/health")
 def health():
-    return {"status": "ok", "phase": 2}
+    return {"status": "ok", "phase": 3}
 
 
 # ---------- auth ----------
@@ -210,6 +215,8 @@ def convert_lead(lead_id: int, user: User = Depends(auth.current_user), db: Sess
                           note="Case opened from converted lead"))
     lead.stage = "Converted"
     db.commit()
+    # Phase 3 (additive): a new case starts with its stream's checklist.
+    documents.init_checklist(db, user.tenant_id, case)
     return {"client_id": client.id, "case": case_out(case)}
 
 
@@ -276,6 +283,8 @@ def create_case(body: CaseIn, user: User = Depends(auth.current_user), db: Sessi
     db.add(CaseStageEvent(case_id=case.id, from_stage="", to_stage=body.stage, note="Case opened"))
     db.commit()
     db.refresh(case)
+    # Phase 3 (additive): a new case starts with its stream's checklist.
+    documents.init_checklist(db, user.tenant_id, case)
     return case_out(case)
 
 

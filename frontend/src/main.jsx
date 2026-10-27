@@ -15,8 +15,15 @@ const patch = async (path, token, body) => {
   if (!r.ok) throw new Error(`${r.status} on ${path}`)
   return r.json()
 }
+const upload = async (path, token, file) => {
+  const fd = new FormData()
+  fd.append('file', file)
+  const r = await fetch(path, { method: 'POST', headers: { Authorization: `Bearer ${token}` }, body: fd })
+  if (!r.ok) throw new Error(`${r.status} on ${path}`)
+  return r.json()
+}
 
-function SignIn({ onDone }) {
+function SignIn({ onDone, onPortal }) {
   const [email, setEmail] = useState('admin@demo.example')
   const [code, setCode] = useState('')
   const [step, setStep] = useState(1)
@@ -41,11 +48,14 @@ function SignIn({ onDone }) {
       <label>Code<br /><input value={code} onChange={e => setCode(e.target.value)} style={{ width: '100%', padding: 8 }} /></label>
       <button onClick={verify} style={{ marginTop: 12, padding: '8px 16px' }}>Sign in</button>
     </>)}
+    <p><button onClick={onPortal} style={{ padding: '6px 12px' }}>I am a client — open the client portal</button></p>
   </div>)
 }
 
 function App() {
   const [token, setToken] = useState(localStorage.getItem('icrm_token'))
+  const [portalToken, setPortalToken] = useState(localStorage.getItem('icrm_portal_token'))
+  const [portal, setPortal] = useState(false)
   const [page, setPage] = useState('dashboard')
   const [me, setMe] = useState(null)
   const [data, setData] = useState(null)
@@ -56,10 +66,12 @@ function App() {
   }, [token])
   useEffect(() => {
     if (!token) return
-    const path = page === 'dashboard' ? '/api/dashboard' : page === 'leads' ? '/api/leads' : page === 'clients' ? '/api/clients' : page === 'cases' ? '/api/cases' : page === 'messages' ? '/api/cases' : page === 'calendar' ? '/api/consultations' : page === 'comms' ? '/api/settings/communications' : '/api/settings'
+    const path = page === 'dashboard' ? '/api/dashboard' : page === 'leads' ? '/api/leads' : page === 'clients' ? '/api/clients' : page === 'cases' ? '/api/cases' : page === 'messages' ? '/api/cases' : page === 'calendar' ? '/api/consultations' : page === 'comms' ? '/api/settings/communications' : page === 'documents' ? '/api/review-queue' : '/api/settings'
     api(path, token).then(setData).catch(e => setErr(String(e)))
   }, [token, page])
-  if (!token) return <SignIn onDone={setToken} />
+  if (portalToken) return <PortalApp token={portalToken} onSignOut={() => { localStorage.removeItem('icrm_portal_token'); setPortalToken(null); setPortal(false) }} />
+  if (portal) return <PortalSignIn onDone={(t) => { localStorage.setItem('icrm_portal_token', t); setPortalToken(t) }} onBack={() => setPortal(false)} />
+  if (!token) return <SignIn onDone={setToken} onPortal={() => setPortal(true)} />
   const nav = { fontFamily: 'sans-serif', padding: 20 }
   const btn = { marginRight: 8, padding: '6px 12px' }
   return (<div style={nav}>
@@ -68,7 +80,7 @@ function App() {
       <span>{me ? `${me.full_name} (${me.role}) — ${me.tenant}` : ''} <button onClick={() => { localStorage.removeItem('icrm_token'); setToken(null) }}>Sign out</button></span>
     </div>
     <div style={{ marginBottom: 16 }}>
-      {['dashboard', 'leads', 'clients', 'cases', 'messages', 'calendar', 'comms', 'settings'].map(p =>
+      {['dashboard', 'leads', 'clients', 'cases', 'messages', 'calendar', 'documents', 'comms', 'settings'].map(p =>
         <button key={p} style={btn} onClick={() => { setPage(p); setData(null); setErr('') }}>{p}</button>)}
     </div>
     {err && <p style={{ color: 'red' }}>{err}</p>}
@@ -83,6 +95,7 @@ function App() {
       <h3>Upcoming deadlines</h3><ul>{(data.upcoming_deadlines || []).map(d => <li key={d.id}>{d.due_date} — {d.title} (case #{d.case_id})</li>)}</ul>
       <h3>Upcoming consultations</h3><ul>{(data.upcoming_consultations || []).map(c => <li key={c.id}>{c.starts_at} — {c.kind} ({c.status})</li>)}</ul>
     </div>)}
+    {page === 'documents' && data && (<DocumentsPage token={token} />)}
     {page === 'messages' && data && (<MessagesPage token={token} cases={data} />)}
     {page === 'calendar' && data && (<CalendarPage token={token} consultations={data} />)}
     {page === 'comms' && data && (<CommsPage token={token} comms={data} />)}
@@ -251,6 +264,152 @@ function CommsPage({ token, comms }) {
     <h3>Templates (firm-editable)</h3>
     <ul>{comms.templates.map(t => <li key={t.id}>{t.key} ({t.channel}): {t.subject ? t.subject + ' — ' : ''}{t.body}</li>)}</ul>
     <p><i>Live sending requires sender verification AND a received test message, per channel. Log mode is the default and never delivers.</i></p>
+  </div>)
+}
+
+function Suggestions({ suggestions, token, refresh }) {
+  if (!suggestions || !suggestions.length) return null
+  return (<div style={{ border: '1px dashed #888', padding: 8, marginTop: 6 }}>
+    <b>AI suggestions (panel — nothing is saved until staff approve)</b>
+    <ul>{suggestions.map(s => <li key={s.id}>
+      [{s.kind}] {s.proposed_field}: {s.proposed_value}
+      {s.source_excerpt ? ` — “${s.source_excerpt}”` : ''} ({s.status})
+      {s.status === 'Pending' && (<>
+        <button onClick={async () => { await api(`/api/suggestions/${s.id}/approve`, token, {}); refresh() }}>Approve</button>{' '}
+        <button onClick={async () => { await api(`/api/suggestions/${s.id}/reject`, token, {}); refresh() }}>Dismiss</button>
+      </>)}
+    </li>)}</ul>
+  </div>)
+}
+
+function DocumentsPage({ token }) {
+  const [queue, setQueue] = useState([])
+  const [expiring, setExpiring] = useState([])
+  const [caseId, setCaseId] = useState('')
+  const [checklist, setChecklist] = useState(null)
+  const [reason, setReason] = useState({})
+  const [file, setFile] = useState({})
+  const [note, setNote] = useState('')
+  const refresh = async () => {
+    setQueue(await api('/api/review-queue', token))
+    setExpiring(await api('/api/documents/expiring', token))
+    if (caseId) setChecklist(await api(`/api/cases/${caseId}/checklist`, token))
+  }
+  useEffect(() => { refresh().catch(e => setNote(String(e))) }, [])
+  const loadChecklist = async () => setChecklist(await api(`/api/cases/${caseId}/checklist`, token))
+  const initChecklist = async () => setChecklist(await api(`/api/cases/${caseId}/checklist/init`, token, {}))
+  const act = async (path, body) => { await api(path, token, body || {}); setNote('Done.'); refresh() }
+  const packet = async () => {
+    const r = await fetch(`/api/cases/${caseId}/packet`, { headers: { Authorization: `Bearer ${token}` } })
+    if (!r.ok) throw new Error(`${r.status} on packet`)
+    const blob = await r.blob()
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a'); a.href = url; a.download = `case-${caseId}-packet.zip`; a.click()
+  }
+  const itemRow = (it) => (<li key={it.id}>
+    <b>{it.document_name}</b> ({it.person}) — {it.status}
+    {it.expiry_date ? ` · expires ${it.expiry_date}` : ''}
+    {it.rejection_reason ? ` · rejected: ${it.rejection_reason}` : ''}
+    {it.latest_version ? ` · v${it.latest_version.version_no} ${it.latest_version.original_filename} (${it.latest_version.review_decision})` : ''}
+    <Suggestions suggestions={it.latest_version ? it.latest_version.suggestions : []} token={token} refresh={refresh} />
+    <div>
+      <button onClick={() => act(`/api/checklist-items/${it.id}/request`)}>Request</button>{' '}
+      <button onClick={() => act(`/api/checklist-items/${it.id}/start-review`)}>Start review</button>{' '}
+      <button onClick={() => act(`/api/checklist-items/${it.id}/approve`)}>Approve</button>{' '}
+      <input placeholder="Rejection reason" value={reason[it.id] || ''} onChange={e => setReason({ ...reason, [it.id]: e.target.value })} />{' '}
+      <button onClick={() => act(`/api/checklist-items/${it.id}/reject`, { reason: reason[it.id] || '' })}>Reject with reason</button>{' '}
+      <input type="file" onChange={e => setFile({ ...file, [it.id]: e.target.files[0] })} />{' '}
+      <button onClick={async () => { if (file[it.id]) { await upload(`/api/checklist-items/${it.id}/upload`, token, file[it.id]); setNote('Uploaded.'); refresh() } }}>Upload (staff)</button>
+    </div>
+  </li>)
+  return (<div><h2>Documents — review queue (W7)</h2>
+    {note && <p>{note}</p>}
+    <p>Case ID <input value={caseId} onChange={e => setCaseId(e.target.value)} />{' '}
+    <button onClick={loadChecklist}>Load checklist</button>{' '}
+    <button onClick={initChecklist}>Init checklist from stream</button>{' '}
+    <button onClick={packet}>Download submission packet (ZIP)</button></p>
+    {checklist && (<><h3>Checklist for case #{caseId}</h3><ul>{checklist.map(itemRow)}</ul></>)}
+    <h3>Review queue (oldest first — approve or reject to empty it)</h3>
+    {queue.length === 0 ? <p>Queue is empty.</p> : <ul>{queue.map(itemRow)}</ul>}
+    <h3>Expiring within 30 days</h3>
+    {expiring.length === 0 ? <p>None.</p> : <ul>{expiring.map(it => <li key={it.id}>{it.document_name} — case #{it.case_id} ({it.client_name}) — expires {it.expiry_date}</li>)}</ul>}
+    <button onClick={async () => { const r = await act('/api/jobs/run-expiry-alerts'); setNote(JSON.stringify(r)) }}>Run expiry alerts job</button>
+  </div>)
+}
+
+function PortalSignIn({ onDone, onBack }) {
+  const [identifier, setIdentifier] = useState('aisha@example.com')
+  const [firm, setFirm] = useState('demo-firm')
+  const [code, setCode] = useState('')
+  const [step, setStep] = useState(1)
+  const [msg, setMsg] = useState('')
+  const request = async () => {
+    const res = await api('/api/portal/request-otp', null, { identifier, firm_slug: firm })
+    setMsg(res.dev_code ? `Development mode — your code is ${res.dev_code} (no message sent).` : res.detail)
+    setStep(2)
+  }
+  const verify = async () => {
+    const res = await api('/api/portal/verify-otp', null, { identifier, firm_slug: firm, code })
+    onDone(res.token)
+  }
+  return (<div style={{ maxWidth: 420, margin: '80px auto', fontFamily: 'sans-serif' }}>
+    <h1>Client portal</h1><h2>Sign in with a one-time code</h2>
+    {step === 1 ? (<>
+      <label>Email or phone<br /><input value={identifier} onChange={e => setIdentifier(e.target.value)} style={{ width: '100%', padding: 8 }} /></label><br />
+      <label>Firm portal (slug)<br /><input value={firm} onChange={e => setFirm(e.target.value)} style={{ width: '100%', padding: 8 }} /></label>
+      <button onClick={request} style={{ marginTop: 12, padding: '8px 16px' }}>Send sign-in code</button>
+    </>) : (<>
+      <p>{msg}</p>
+      <label>Code<br /><input value={code} onChange={e => setCode(e.target.value)} style={{ width: '100%', padding: 8 }} /></label>
+      <button onClick={verify} style={{ marginTop: 12, padding: '8px 16px' }}>Sign in</button>
+    </>)}
+    <p><button onClick={onBack} style={{ padding: '6px 12px' }}>Back to staff sign-in</button></p>
+  </div>)
+}
+
+function PortalApp({ token, onSignOut }) {
+  const [cases, setCases] = useState([])
+  const [detail, setDetail] = useState(null)
+  const [file, setFile] = useState({})
+  const [note, setNote] = useState('')
+  const [me, setMe] = useState(null)
+  useEffect(() => {
+    api('/api/portal/me', token).then(setMe).catch(e => setNote(String(e)))
+    api('/api/portal/cases', token).then(setCases).catch(e => setNote(String(e)))
+  }, [token])
+  const open = async (id) => setDetail(await api(`/api/portal/cases/${id}`, token))
+  const up = async (caseId, itemId) => {
+    if (!file[itemId]) return
+    await upload(`/api/portal/cases/${caseId}/checklist/${itemId}/upload`, token, file[itemId])
+    setNote('Uploaded — the firm will review it.')
+    open(caseId)
+  }
+  return (<div style={{ fontFamily: 'sans-serif', padding: 20 }}>
+    <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+      <h1>Client portal</h1>
+      <span>{me ? me.full_name : ''} <button onClick={onSignOut}>Sign out</button></span>
+    </div>
+    {note && <p>{note}</p>}
+    <h2>Your cases</h2>
+    <ul>{cases.map(c => <li key={c.id}>
+      <button onClick={() => open(c.id)}>Case #{c.id} — {c.stream} · {c.stage}</button>{' '}
+      Checklist: {Object.entries(c.checklist_counts).filter(([, n]) => n > 0).map(([s, n]) => `${s}: ${n}`).join(', ') || 'none'}
+      {c.next_deadline ? ` · Next deadline: ${c.next_deadline.title} (${c.next_deadline.due_date})` : ''}
+    </li>)}</ul>
+    {detail && (<div>
+      <h2>Case #{detail.case.id} — {detail.case.stream} · {detail.case.stage}</h2>
+      <h3>Documents</h3>
+      <ul>{detail.checklist.map(it => <li key={it.id}>
+        <b>{it.document_name}</b> — {it.status}
+        {it.expiry_date ? ` · expires ${it.expiry_date}` : ''}
+        {it.rejection_reason ? (<span style={{ color: 'red' }}> · Needs attention: {it.rejection_reason} — please re-upload.</span>) : ''}
+        {it.latest_version ? ` · latest: v${it.latest_version.version_no} ${it.latest_version.original_filename}` : ''}
+        <div><input type="file" onChange={e => setFile({ ...file, [it.id]: e.target.files[0] })} />{' '}
+        <button onClick={() => up(detail.case.id, it.id)}>Upload</button></div>
+      </li>)}</ul>
+      <h3>Messages from the firm</h3>
+      <ul>{detail.messages.map((m, i) => <li key={i}>[{m.channel}] {m.body} ({m.status})</li>)}</ul>
+    </div>)}
   </div>)
 }
 

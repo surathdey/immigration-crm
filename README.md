@@ -1,12 +1,15 @@
-# Immigration Consultant CRM — Phase 1 + Phase 2
+# Immigration Consultant CRM — Phase 1 + Phase 2 + Phase 3
 
 Staff CRM for immigration consultants: leads, clients, cases, dashboard,
 stream templates, firm/team settings (Phase 1), plus communications and
 calendar (Phase 2): SMS via Twilio and email via SendGrid in log mode by
 default, Calendly booking links, Google Calendar two-way sync,
 consultation booking/reminders/reschedule/cancel, deadline reminders,
-and AI-drafted staff messages behind a human gate. No client portal
-(Phase 3), no billing (Phase 4).
+and AI-drafted staff messages behind a human gate. Plus documents and
+the client portal (Phase 3): per-stream document checklists, upload +
+version history, review queue with approve/reject-with-reason, expiry
+alerts, submission packet download, AI document reading behind a human
+gate, and a client portal with OTP sign-in. No billing (Phase 4).
 
 Stack: FastAPI + React (Vite) + PostgreSQL + Docker. Tenancy is one
 codebase with tenant-scoped rows (the design doc default;
@@ -45,6 +48,16 @@ npm install && npm run dev   # http://localhost:5173 (proxies /api)
 Do NOT enable DEV_OTP in production: with it on, anyone who knows a
 staff email can sign in. Production OTP delivery needs the Phase 2
 channel.
+
+## Client portal login (works out of the box, dev mode only)
+
+From the sign-in screen, choose "I am a client — open the client
+portal". Enter the client email (`aisha@example.com` for the demo
+client) and the firm slug (`demo-firm`), request a code, and sign in
+with the returned code. The portal shows only that client's own cases,
+checklist, uploads, and messages — never another client's data. A
+portal token cannot call staff endpoints (401), and a staff token
+cannot call portal endpoints (401).
 
 ## Phase 2 — communications and calendar (Features 11–17)
 
@@ -115,14 +128,58 @@ Frontend pages added: Messages (case log + compose + AI drafts),
 Calendar (week view + booking), Comms (settings, gates, templates),
 lead-detail inline booking.
 
+## Phase 3 — documents and client portal (W7, W10, W11, Section 6.1)
+
+**Checklists:** every case starts with its stream template's document
+checklist (auto-created on case open; `POST /cases/{id}/checklist/init`
+backfills older cases). Statuses follow the design doc's fixed ladder:
+Not Started / Requested / Uploaded / Under Review / Approved /
+Rejected / Expired.
+
+**Uploads + versions:** files live under `backend/data/uploads/` (a
+gitignored dir), referenced from the database — never stored as blobs.
+Every upload is a new version; the full history (with each version's
+review decision and reason) is kept. Staff and clients upload through
+separate endpoints with separate auth; a client uploads only against
+checklist items on their own cases.
+
+**Review queue (W7):** items in Uploaded or Under Review, oldest
+first. Staff request → start review → approve, or reject with a
+reason (a reason is required; an empty reason is refused). The client
+sees the reason in the portal and re-uploads; the queue empties as
+items are decided. Review decisions notify the client through the
+Phase 2 log-mode adapters (no new senders).
+
+**AI document reading (6.1):** the same template-adapter pattern as
+Phase 2 drafts (`AI_PROVIDER=template`, default). When a readable text
+file is uploaded, the adapter proposes case-field values (UCI, IRCC
+file number, expiry date) and mismatch flags (name differs from the
+file, expiry already past) into the W7 AI suggestions panel. A proposal
+is NEVER a case value until a consultant approves it: approving a value
+suggestion writes the field, approving a mismatch only acknowledges it,
+and rejecting dismisses it. Binary/unreadable uploads produce no
+suggestions, by design — the panel is simply empty.
+
+**Expiry alerts + packet:** `POST /api/jobs/run-expiry-alerts` flips
+past-expiry items to Expired and alerts items expiring within 30 days,
+each expiry date alerted once (re-runs never spam). `GET
+/api/cases/{id}/packet` downloads a ZIP of the latest APPROVED version
+of each item plus a manifest (items without an approved version are
+listed as missing, not silently dropped).
+
+**Portal (W10/W11):** clients sign in with an email/phone OTP
+(firm-scoped via slug); portal home shows their cases with checklist
+counts and the next deadline; portal documents show each item's
+status, rejection reasons, and the firm's messages (read-only).
+
 ## Acceptance-test checklist (actually run, Oct 27, 2026)
 
 Backend booted from `backend/` on a fresh SQLite file with
 `DEV_OTP=true`, `ALLOW_TEST_HOOKS=true`; `python scripts/smoke_test.py`
-(55 checks), `scripts/phase2_isolation_probe.py` (11 checks),
+(91 checks), `scripts/phase3_isolation_probe.py` (11 checks),
 `scripts/phase2_unit_checks.py` (10 checks), and `vite build` — all
-against the same build. Phase 1 checks 1–16 re-ran unchanged (health
-now reports phase 2).
+against the same build. Phase 1 + Phase 2 checks re-ran unchanged
+(health now reports phase 3).
 
 | # | Check | Result |
 |---|-------|--------|
@@ -153,8 +210,22 @@ now reports phase 2).
 | 40 | Second firm sees none of the first firm's Phase 2 resources (11 probe checks) | PASS |
 | 41 | Google payload privacy + template rendering + hours helpers (10 unit checks) | PASS |
 | 42 | Frontend production build (`vite build`) | PASS |
+| 43 | Checklist init from stream template (5 Express Entry items), idempotent | PASS |
+| 44 | Staff requests a document; client notified in log mode | PASS |
+| 45 | Portal OTP sign-in (email + firm slug); portal home shows only own cases + checklist counts | PASS |
+| 46 | Client uploads in portal → version 1, item Uploaded, AI expiry + UCI proposals Pending (nothing applied yet) | PASS |
+| 47 | Review queue holds the item; start review → Under Review; empty-reason reject refused | PASS |
+| 48 | Reject with reason → client sees the reason in the portal | PASS |
+| 49 | Client re-uploads → version 2; version history keeps both decisions; approve → queue empties for the item; double-approve refused | PASS |
+| 50 | Approving AI proposals writes expiry date to the item and UCI to the case; a decided suggestion cannot be decided twice | PASS |
+| 51 | Name-mismatch flag dismissed with no client data changed | PASS |
+| 52 | Staff upload path; staff + portal download return the uploaded bytes | PASS |
+| 53 | Expiry job: past-expiry → Expired + notified; expiring-soon alerts exactly once across re-runs | PASS |
+| 54 | Submission packet ZIP with manifest naming the approved Passport | PASS |
+| 55 | Token separation: portal token 401 on staff endpoints, staff token 401 on portal endpoints | PASS |
+| 56 | Isolation probe: Firm B sees nothing of Firm A documents; portal client sees nothing of another client's case (11 probe checks) | PASS |
 
-Total: 55 smoke + 11 isolation + 10 unit, 0 failed. Docker Compose was
+Total: 91 smoke + 11 isolation + 10 unit, 0 failed. Docker Compose was
 NOT run here (no Docker on the build machine) — it is provided
 following the proven platform pattern and needs one
 `docker compose up --build` on a Docker host before it counts as
@@ -169,13 +240,22 @@ verified.
 - Real Calendly webhook signature + live booking (webhook contract
   implemented; HMAC enforced when the secret is set).
 - The Docker Compose run (see above).
+- Real AI document reading (a managed model provider): the built-in
+  template adapter reads only readable text files; scanned PDFs/images
+  produce no suggestions until a real reader is configured.
 - The Phase 2 demo gate with Surath (test SMS/email received, Calendly
   booking on a lead, Google event blocking a slot, reschedule
-  notification, AI draft approval) — the user tests everything at once
+  notification, AI draft approval) — the user tests phase by phase
   later; nothing here asks for testing now.
+- The Phase 3 demo gate with Surath (client uploads → staff rejects
+  with reason → client sees reason and re-uploads → staff approves, end
+  to end with no phone call; review queue empties top to bottom; an
+  upload's proposed field values stay unsaved until consultant
+  approval) — same deferred phase-by-phase testing.
 
 ## Phase gate
 
-Phase 2 is built and committed. Testing is deferred: the user tests
-everything at once later.
+Phase 3 is built and committed locally (not yet pushed — the parent
+pushes after verification). Testing is deferred: the user tests phase
+by phase later.
 
