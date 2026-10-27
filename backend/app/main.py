@@ -1,14 +1,17 @@
-"""Immigration Consultant CRM — Phase 1 API.
+"""Immigration Consultant CRM — Phase 1 API + Phase 2 routes.
 
 Endpoints (all tenant-scoped; branch-scoped for non-admin staff):
   GET  /api/health
   POST /api/auth/request-otp, POST /api/auth/verify-otp
   GET  /api/me
   GET/POST /api/leads, GET/PATCH /api/leads/{id}, POST /api/leads/{id}/convert
-  GET/POST /api/clients, GET /api/clients/{id} (360 view: client + cases)
+  GET/POST /api/clients, GET /api/clients/{id} (360 view: client + cases + messages + consultations)
   GET/POST /api/cases, GET/PATCH /api/cases/{id} (stage move appends timeline)
-  GET  /api/dashboard (core cards, computed live)
+  GET  /api/dashboard (core cards + action items + upcoming deadlines/consultations)
   GET  /api/templates (stream templates), GET /api/settings (firm + team)
+  Phase 2 routes live in routers_phase2.py (comms settings, messages,
+  event types, consultations, calendar week view + webhooks, deadlines,
+  jobs, action items, AI drafts, audit log).
 """
 from datetime import date
 from fastapi import FastAPI, Depends, HTTPException
@@ -18,12 +21,18 @@ from sqlalchemy.orm import Session
 
 from .db import get_db, engine, Base
 from .models import Tenant, Branch, User, Lead, Client, Case, CaseStageEvent, StreamTemplate, LEAD_STAGES
-from . import auth
+from . import auth, messaging, booking
+from . import models_phase2  # noqa: F401 — registers Phase 2 tables for create_all
+from .routers_phase2 import router as phase2_router
 from .seed import seed as run_seed
 
 Base.metadata.create_all(bind=engine)
-app = FastAPI(title="Immigration Consultant CRM — Phase 1")
+app = FastAPI(title="Immigration Consultant CRM — Phase 2")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+app.include_router(phase2_router)
+if messaging.ALLOW_TEST_HOOKS:
+    from .test_hooks import router as test_hooks_router
+    app.include_router(test_hooks_router)
 
 
 @app.on_event("startup")
@@ -33,7 +42,7 @@ def startup():
 
 @app.get("/api/health")
 def health():
-    return {"status": "ok", "phase": 1}
+    return {"status": "ok", "phase": 2}
 
 
 # ---------- auth ----------
@@ -228,9 +237,28 @@ def client_360(client_id: int, user: User = Depends(auth.current_user), db: Sess
     if not client:
         raise HTTPException(404, "Client not found")
     cases = db.query(Case).filter(Case.client_id == client.id, Case.tenant_id == user.tenant_id).all()
+    case_ids = [c.id for c in cases]
+    messages = []
+    if case_ids:
+        from .models_phase2 import CaseMessage, Consultation
+        from sqlalchemy import or_
+        messages = db.query(CaseMessage).filter(
+            CaseMessage.tenant_id == user.tenant_id,
+            or_(CaseMessage.case_id.in_(case_ids),
+                CaseMessage.client_id == client.id)).order_by(
+            CaseMessage.created_at, CaseMessage.id).all()
+        consultations = db.query(Consultation).filter(
+            Consultation.tenant_id == user.tenant_id,
+            Consultation.client_id == client.id).order_by(Consultation.starts_at).all()
+    else:
+        consultations = []
     return {"id": client.id, "full_name": client.full_name, "email": client.email,
             "phone": client.phone, "country_of_origin": client.country_of_origin,
-            "cases": [case_out(c) for c in cases]}
+            "cases": [case_out(c) for c in cases],
+            "messages": [{"id": m.id, "channel": m.channel, "body": m.body,
+                          "status": m.status, "at": str(m.created_at)} for m in messages],
+            "consultations": [{"id": c.id, "kind": c.kind, "starts_at": str(c.starts_at),
+                               "status": c.status, "source": c.source} for c in consultations]}
 
 
 # ---------- cases ----------
@@ -290,9 +318,29 @@ def dashboard(user: User = Depends(auth.current_user), db: Session = Depends(get
         [{"type": "lead follow-up", "name": l.full_name, "date": str(l.next_follow_up)}
          for l in leads if l.next_follow_up],
         key=lambda x: x["date"])[:10]
+    # Phase 2 additions (existing keys untouched).
+    from .models_phase2 import ActionItem, Deadline, Consultation
+    from datetime import datetime
+    now = datetime.utcnow()
+    action_items = db.query(ActionItem).filter(
+        ActionItem.tenant_id == user.tenant_id, ActionItem.resolved == False
+    ).order_by(ActionItem.id.desc()).all()
+    upcoming_deadlines = db.query(Deadline).filter(
+        Deadline.tenant_id == user.tenant_id, Deadline.done == False,
+        Deadline.due_date >= now).order_by(Deadline.due_date).limit(10).all()
+    upcoming_cons = auth.scope_filter(user, db.query(Consultation), Consultation).filter(
+        Consultation.status.in_(["booked", "rescheduled"]),
+        Consultation.starts_at >= now).order_by(Consultation.starts_at).limit(10).all()
     return {"active_cases": len(cases), "total_leads": len(leads),
             "leads_by_stage": by_stage, "cases_by_stream": by_stream,
-            "upcoming_follow_ups": upcoming}
+            "upcoming_follow_ups": upcoming,
+            "action_items": [{"id": a.id, "kind": a.kind, "title": a.title,
+                              "detail": a.detail} for a in action_items],
+            "upcoming_deadlines": [{"id": d.id, "case_id": d.case_id, "title": d.title,
+                                    "due_date": str(d.due_date)} for d in upcoming_deadlines],
+            "upcoming_consultations": [{"id": c.id, "kind": c.kind,
+                                        "starts_at": str(c.starts_at),
+                                        "status": c.status} for c in upcoming_cons]}
 
 
 @app.get("/api/templates")
