@@ -130,20 +130,38 @@ function App() {
 }
 
 function Leads({ token, leads, refresh }) {
+  const [showForm, setShowForm] = useState(false)
   const [name, setName] = useState('')
+  const [phone, setPhone] = useState('')
+  const [email, setEmail] = useState('')
   const [stream, setStream] = useState('Express Entry')
+  const [source, setSource] = useState('')
+  const [referral, setReferral] = useState('')
+  const [notes, setNotes] = useState('')
+  const [followUp, setFollowUp] = useState('')
   const [detailId, setDetailId] = useState(null)
+  const clearForm = () => { setName(''); setPhone(''); setEmail(''); setStream('Express Entry'); setSource(''); setReferral(''); setNotes(''); setFollowUp('') }
   const add = async () => {
     if (!name.trim()) return
-    await api('/api/leads', token, { full_name: name, stream_of_interest: stream })
-    setName(''); refresh()
+    const fullNotes = [referral.trim() ? `Referral: ${referral.trim()}` : '', notes.trim()].filter(Boolean).join('\n')
+    await api('/api/leads', token, { full_name: name.trim(), phone, email, source, stream_of_interest: stream, notes: fullNotes, next_follow_up: followUp || null })
+    clearForm(); setShowForm(false); refresh()
   }
   const move = async (id, stage) => { await patch(`/api/leads/${id}`, token, { stage }); refresh() }
   const convert = async (id) => { await api(`/api/leads/${id}/convert`, token, {}, 'POST'); refresh() }
   return (<div><h2>Leads pipeline</h2>
-    <div className="add-bar"><input placeholder="New lead name" value={name} onChange={e => setName(e.target.value)} />
-      <select value={stream} onChange={e => setStream(e.target.value)}>{['Express Entry', 'PNP', 'LMIA', 'Study', 'Work', 'Family Sponsorship'].map(s => <option key={s}>{s}</option>)}</select>
-      <button className="btn" onClick={add}>Add lead</button></div>
+    {!showForm && <button className="btn" onClick={() => setShowForm(true)}>Add lead</button>}
+    {showForm && <div className="card"><h3>Add lead</h3>
+      <p>Full name <input value={name} onChange={e => setName(e.target.value)} /></p>
+      <p>Phone <input value={phone} onChange={e => setPhone(e.target.value)} /></p>
+      <p>Email <input value={email} onChange={e => setEmail(e.target.value)} /></p>
+      <p>Stream <select value={stream} onChange={e => setStream(e.target.value)}>{['Express Entry', 'PNP', 'LMIA', 'Study', 'Work', 'Family Sponsorship'].map(s => <option key={s}>{s}</option>)}</select></p>
+      <p>Source <select value={source} onChange={e => setSource(e.target.value)}>{['', 'Website', 'WhatsApp', 'Facebook', 'Instagram', 'Referral', 'Walk-in', 'Other'].map(s => <option key={s} value={s}>{s || '—'}</option>)}</select></p>
+      <p>Referral details <input value={referral} onChange={e => setReferral(e.target.value)} /></p>
+      <p>Notes <textarea value={notes} onChange={e => setNotes(e.target.value)} /></p>
+      <p>Next follow-up <input type="date" value={followUp} onChange={e => setFollowUp(e.target.value)} /></p>
+      <button className="btn" onClick={add}>Save lead</button>{' '}
+      <button onClick={() => { clearForm(); setShowForm(false) }}>Cancel</button></div>}
     <table className="data"><thead><tr><th>Name</th><th>Stream</th><th>Stage</th><th>Source</th><th></th></tr></thead>
     <tbody>{leads.map(l => (<React.Fragment key={l.id}><tr>
       <td>{l.full_name}</td>
