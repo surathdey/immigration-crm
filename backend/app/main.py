@@ -36,6 +36,7 @@ from .routers_phase2 import router as phase2_router
 from .routers_phase3 import router as phase3_router
 from .routers_phase4 import router as phase4_router
 from .routers_phase5 import router as phase5_router
+from .webhooks import router as webhooks_router
 from .seed import seed as run_seed
 
 Base.metadata.create_all(bind=engine)
@@ -45,6 +46,7 @@ app.include_router(phase2_router)
 app.include_router(phase3_router)
 app.include_router(phase4_router)
 app.include_router(phase5_router)
+app.include_router(webhooks_router)
 if messaging.ALLOW_TEST_HOOKS:
     from .test_hooks import router as test_hooks_router
     app.include_router(test_hooks_router)
