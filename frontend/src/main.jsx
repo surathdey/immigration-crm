@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react'
 import { createRoot } from 'react-dom/client'
+import './styles.css'
 
 const api = async (path, token, body, method = 'GET') => {
   const r = await fetch(path, {
@@ -38,7 +39,7 @@ function SignIn({ onDone, onPortal }) {
     localStorage.setItem('icrm_token', res.token)
     onDone(res.token)
   }
-  return (<div style={{ maxWidth: 420, margin: '80px auto', fontFamily: 'sans-serif' }}>
+  return (<div className="auth-card" style={{ maxWidth: 420, margin: '80px auto', fontFamily: 'sans-serif' }}>
     <h1>Immigration Consultant CRM</h1><h2>Sign in to your firm</h2>
     {step === 1 ? (<>
       <label>Work email address<br /><input value={email} onChange={e => setEmail(e.target.value)} style={{ width: '100%', padding: 8 }} /></label>
@@ -74,18 +75,18 @@ function App() {
   if (!token) return <SignIn onDone={setToken} onPortal={() => setPortal(true)} />
   const nav = { fontFamily: 'sans-serif', padding: 20 }
   const btn = { marginRight: 8, padding: '6px 12px' }
-  return (<div style={nav}>
-    <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+  return (<div className="app-shell" style={nav}>
+    <div className="app-header" style={{ display: 'flex', justifyContent: 'space-between' }}>
       <h1>Immigration Consultant CRM</h1>
       <span>{me ? `${me.full_name} (${me.role}) — ${me.tenant}` : ''} <button onClick={() => { localStorage.removeItem('icrm_token'); setToken(null) }}>Sign out</button></span>
     </div>
-    <div style={{ marginBottom: 16 }}>
+    <div className="app-nav" style={{ marginBottom: 16 }}>
       {['dashboard', 'leads', 'clients', 'cases', 'messages', 'calendar', 'documents', 'billing', 'reports', 'retainers', 'forms', 'chasing', 'precheck', 'comms', 'settings'].map(p =>
-        <button key={p} style={btn} onClick={() => { setPage(p); setData(null); setErr('') }}>{p}</button>)}
+        <button key={p} className={p === page ? 'nav-active' : undefined} style={btn} onClick={() => { setPage(p); setData(null); setErr('') }}>{p}</button>)}
     </div>
     {err && <p style={{ color: 'red' }}>{err}</p>}
     {!data && !err && <p>Loading…</p>}
-    {page === 'dashboard' && data && (<div>
+    {page === 'dashboard' && data && (<div className="dashboard">
       <h2>Firm dashboard</h2>
       <p>Active cases: <b>{data.active_cases}</b> · Total leads: <b>{data.total_leads}</b></p>
       <h3>Leads by stage</h3><ul>{Object.entries(data.leads_by_stage).map(([s, n]) => <li key={s}>{s}: {n}</li>)}</ul>
@@ -359,7 +360,7 @@ function PortalSignIn({ onDone, onBack }) {
     const res = await api('/api/portal/verify-otp', null, { identifier, firm_slug: firm, code })
     onDone(res.token)
   }
-  return (<div style={{ maxWidth: 420, margin: '80px auto', fontFamily: 'sans-serif' }}>
+  return (<div className="auth-card" style={{ maxWidth: 420, margin: '80px auto', fontFamily: 'sans-serif' }}>
     <h1>Client portal</h1><h2>Sign in with a one-time code</h2>
     {step === 1 ? (<>
       <label>Email or phone<br /><input value={identifier} onChange={e => setIdentifier(e.target.value)} style={{ width: '100%', padding: 8 }} /></label><br />
@@ -391,8 +392,8 @@ function PortalApp({ token, onSignOut }) {
     setNote('Uploaded — the firm will review it.')
     open(caseId)
   }
-  return (<div style={{ fontFamily: 'sans-serif', padding: 20 }}>
-    <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+  return (<div className="portal-shell" style={{ fontFamily: 'sans-serif', padding: 20 }}>
+    <div className="app-header" style={{ display: 'flex', justifyContent: 'space-between' }}>
       <h1>Client portal</h1>
       <span>{me ? me.full_name : ''} <button onClick={onSignOut}>Sign out</button></span>
     </div>
