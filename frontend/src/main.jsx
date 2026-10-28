@@ -23,6 +23,7 @@ const upload = async (path, token, file) => {
   if (!r.ok) throw new Error(`${r.status} on ${path}`)
   return r.json()
 }
+const badgeClass = (stage) => stage === 'Converted' ? 'teal' : stage === 'Qualified' ? 'gold' : stage === 'Consultation' ? 'navy' : stage === 'Lost' ? 'red' : 'slate'
 
 function SignIn({ onDone, onPortal }) {
   const [email, setEmail] = useState('admin@demo.example')
@@ -39,18 +40,18 @@ function SignIn({ onDone, onPortal }) {
     localStorage.setItem('icrm_token', res.token)
     onDone(res.token)
   }
-  return (<div className="auth-card" style={{ maxWidth: 420, margin: '80px auto', fontFamily: 'sans-serif' }}>
+  return (<div className="login-wrap"><div className="card login-card">
     <h1>Immigration Consultant CRM</h1><h2>Sign in to your firm</h2>
     {step === 1 ? (<>
       <label>Work email address<br /><input value={email} onChange={e => setEmail(e.target.value)} style={{ width: '100%', padding: 8 }} /></label>
-      <button onClick={request} style={{ marginTop: 12, padding: '8px 16px' }}>Send sign-in code</button>
+      <button className="btn" onClick={request} style={{ marginTop: 12, padding: '8px 16px' }}>Send sign-in code</button>
     </>) : (<>
       <p>{msg}</p>
       <label>Code<br /><input value={code} onChange={e => setCode(e.target.value)} style={{ width: '100%', padding: 8 }} /></label>
-      <button onClick={verify} style={{ marginTop: 12, padding: '8px 16px' }}>Sign in</button>
+      <button className="btn" onClick={verify} style={{ marginTop: 12, padding: '8px 16px' }}>Sign in</button>
     </>)}
-    <p><button onClick={onPortal} style={{ padding: '6px 12px' }}>I am a client — open the client portal</button></p>
-  </div>)
+    <p><button onClick={onPortal}>I am a client — open the client portal</button></p>
+  </div></div>)
 }
 
 function App() {
@@ -73,28 +74,39 @@ function App() {
   if (portalToken) return <PortalApp token={portalToken} onSignOut={() => { localStorage.removeItem('icrm_portal_token'); setPortalToken(null); setPortal(false) }} />
   if (portal) return <PortalSignIn onDone={(t) => { localStorage.setItem('icrm_portal_token', t); setPortalToken(t) }} onBack={() => setPortal(false)} />
   if (!token) return <SignIn onDone={setToken} onPortal={() => setPortal(true)} />
-  const nav = { fontFamily: 'sans-serif', padding: 20 }
-  const btn = { marginRight: 8, padding: '6px 12px' }
-  return (<div className="app-shell" style={nav}>
-    <div className="app-header" style={{ display: 'flex', justifyContent: 'space-between' }}>
-      <h1>Immigration Consultant CRM</h1>
-      <span>{me ? `${me.full_name} (${me.role}) — ${me.tenant}` : ''} <button onClick={() => { localStorage.removeItem('icrm_token'); setToken(null) }}>Sign out</button></span>
-    </div>
-    <div className="app-nav" style={{ marginBottom: 16 }}>
-      {['dashboard', 'leads', 'clients', 'cases', 'messages', 'calendar', 'documents', 'billing', 'reports', 'retainers', 'forms', 'chasing', 'precheck', 'comms', 'settings'].map(p =>
-        <button key={p} className={p === page ? 'nav-active' : undefined} style={btn} onClick={() => { setPage(p); setData(null); setErr('') }}>{p}</button>)}
-    </div>
+  return (<div className="shell">
+    <aside className="sidebar">
+      <div className="brand">IMMIGRATION CRM</div>
+      <nav>
+        {['dashboard', 'leads', 'clients', 'cases', 'messages', 'calendar', 'documents', 'billing', 'reports', 'retainers', 'forms', 'chasing', 'precheck', 'comms', 'settings'].map(p =>
+          <button key={p} className={p === page ? 'active' : ''} onClick={() => { setPage(p); setData(null); setErr('') }}>{p}</button>)}
+      </nav>
+      <div className="tenant">
+        <b>{me ? me.tenant : ''}</b>
+        {me ? `${me.full_name} (${me.role})` : ''}
+        <button className="logout" onClick={() => { localStorage.removeItem('icrm_token'); setToken(null) }}>Sign out</button>
+      </div>
+    </aside>
+    <main className="main">
     {err && <p style={{ color: 'red' }}>{err}</p>}
     {!data && !err && <p>Loading…</p>}
-    {page === 'dashboard' && data && (<div className="dashboard">
+    {page === 'dashboard' && data && (<div>
       <h2>Firm dashboard</h2>
-      <p>Active cases: <b>{data.active_cases}</b> · Total leads: <b>{data.total_leads}</b></p>
-      <h3>Leads by stage</h3><ul>{Object.entries(data.leads_by_stage).map(([s, n]) => <li key={s}>{s}: {n}</li>)}</ul>
-      <h3>Cases by stream</h3><ul>{Object.entries(data.cases_by_stream).map(([s, n]) => <li key={s}>{s}: {n}</li>)}</ul>
-      <h3>Upcoming follow-ups</h3><ul>{data.upcoming_follow_ups.map((u, i) => <li key={i}>{u.date} — {u.name} ({u.type})</li>)}</ul>
-      <h3>Action items (failed sends, reminders, syncs)</h3><ul>{(data.action_items || []).map(a => <li key={a.id}>{a.title} — {a.detail}</li>)}</ul>
-      <h3>Upcoming deadlines</h3><ul>{(data.upcoming_deadlines || []).map(d => <li key={d.id}>{d.due_date} — {d.title} (case #{d.case_id})</li>)}</ul>
-      <h3>Upcoming consultations</h3><ul>{(data.upcoming_consultations || []).map(c => <li key={c.id}>{c.starts_at} — {c.kind} ({c.status})</li>)}</ul>
+      <div className="stats">
+        <div className="stat"><b>{data.active_cases}</b><span>Active cases</span></div>
+        <div className="stat"><b>{data.total_leads}</b><span>Total leads</span></div>
+        <div className="stat"><b>{data.upcoming_follow_ups.length}</b><span>Upcoming follow-ups</span></div>
+      </div>
+      <div className="grid">
+        <div className="card"><h3>Leads by stage</h3>{Object.entries(data.leads_by_stage).map(([s, n]) => <div className="stage-row" key={s}><span className="stage-name">{s}</span><span className="stage-count">{n}</span><span className="share-bar"><i style={{ width: `${data.total_leads ? (n / data.total_leads) * 100 : 0}%` }} /></span></div>)}</div>
+        <div className="card"><h3>Cases by stream</h3><ul>{Object.entries(data.cases_by_stream).map(([s, n]) => <li key={s}>{s}: {n}</li>)}</ul></div>
+      </div>
+      <div className="stack">
+        <div className="card"><h3>Upcoming follow-ups</h3><ul>{data.upcoming_follow_ups.map((u, i) => <li key={i}>{u.date} — {u.name} ({u.type})</li>)}</ul></div>
+        <div className="card"><h3>Action items (failed sends, reminders, syncs)</h3><ul>{(data.action_items || []).map(a => <li key={a.id}>{a.title} — {a.detail}</li>)}</ul></div>
+        <div className="card"><h3>Upcoming deadlines</h3><ul>{(data.upcoming_deadlines || []).map(d => <li key={d.id}>{d.due_date} — {d.title} (case #{d.case_id})</li>)}</ul></div>
+        <div className="card"><h3>Upcoming consultations</h3><ul>{(data.upcoming_consultations || []).map(c => <li key={c.id}>{c.starts_at} — {c.kind} ({c.status})</li>)}</ul></div>
+      </div>
     </div>)}
     {page === 'documents' && data && (<DocumentsPage token={token} />)}
     {page === 'billing' && data && (<BillingPage token={token} invoices={data} refresh={() => api('/api/invoices', token).then(setData)} />)}
@@ -113,6 +125,7 @@ function App() {
       <h3>Branches</h3><ul>{data.branches.map(b => <li key={b.id}>{b.name} ({b.city})</li>)}</ul>
       <h3>Team</h3><ul>{data.team.map(u => <li key={u.id}>{u.full_name} — {u.role} — {u.email}</li>)}</ul>
       <SubscriptionBlock token={token} /></div>)}
+    </main>
   </div>)
 }
 
@@ -128,17 +141,23 @@ function Leads({ token, leads, refresh }) {
   const move = async (id, stage) => { await patch(`/api/leads/${id}`, token, { stage }); refresh() }
   const convert = async (id) => { await api(`/api/leads/${id}/convert`, token, {}, 'POST'); refresh() }
   return (<div><h2>Leads pipeline</h2>
-    <div><input placeholder="New lead name" value={name} onChange={e => setName(e.target.value)} />
+    <div className="add-bar"><input placeholder="New lead name" value={name} onChange={e => setName(e.target.value)} />
       <select value={stream} onChange={e => setStream(e.target.value)}>{['Express Entry', 'PNP', 'LMIA', 'Study', 'Work', 'Family Sponsorship'].map(s => <option key={s}>{s}</option>)}</select>
-      <button onClick={add}>Add lead</button></div>
-    <ul>{leads.map(l => <li key={l.id}>{l.full_name} — {l.stream_of_interest} · <b>{l.stage}</b>
-      {' '}<button onClick={() => setDetailId(detailId === l.id ? null : l.id)}>Details</button>
+      <button className="btn" onClick={add}>Add lead</button></div>
+    <table className="data"><thead><tr><th>Name</th><th>Stream</th><th>Stage</th><th>Source</th><th></th></tr></thead>
+    <tbody>{leads.map(l => (<React.Fragment key={l.id}><tr>
+      <td>{l.full_name}</td>
+      <td>{l.stream_of_interest}</td>
+      <td><span className={`badge ${badgeClass(l.stage)}`}>{l.stage}</span></td>
+      <td>{l.source}</td>
+      <td><button onClick={() => setDetailId(detailId === l.id ? null : l.id)}>Details</button>
       <button onClick={() => move(l.id, 'Contacted')}>Contacted</button>
       <button onClick={() => move(l.id, 'Qualified')}>Qualified</button>
       <button onClick={() => move(l.id, 'Consultation')}>Consultation</button>
       {l.stage !== 'Converted' && l.stage !== 'Lost' && <button onClick={() => convert(l.id)}>Convert to client + case</button>}
-      <button onClick={() => move(l.id, 'Lost')}>Lost</button>
-      {detailId === l.id && <LeadDetail token={token} lead={l} />}</li>)}</ul>
+      <button onClick={() => move(l.id, 'Lost')}>Lost</button></td></tr>
+      {detailId === l.id && <tr><td colSpan={5}><LeadDetail token={token} lead={l} /></td></tr>}
+    </React.Fragment>))}</tbody></table>
   </div>)
 }
 
@@ -360,19 +379,19 @@ function PortalSignIn({ onDone, onBack }) {
     const res = await api('/api/portal/verify-otp', null, { identifier, firm_slug: firm, code })
     onDone(res.token)
   }
-  return (<div className="auth-card" style={{ maxWidth: 420, margin: '80px auto', fontFamily: 'sans-serif' }}>
+  return (<div className="login-wrap"><div className="card login-card">
     <h1>Client portal</h1><h2>Sign in with a one-time code</h2>
     {step === 1 ? (<>
       <label>Email or phone<br /><input value={identifier} onChange={e => setIdentifier(e.target.value)} style={{ width: '100%', padding: 8 }} /></label><br />
       <label>Firm portal (slug)<br /><input value={firm} onChange={e => setFirm(e.target.value)} style={{ width: '100%', padding: 8 }} /></label>
-      <button onClick={request} style={{ marginTop: 12, padding: '8px 16px' }}>Send sign-in code</button>
+      <button className="btn" onClick={request} style={{ marginTop: 12, padding: '8px 16px' }}>Send sign-in code</button>
     </>) : (<>
       <p>{msg}</p>
       <label>Code<br /><input value={code} onChange={e => setCode(e.target.value)} style={{ width: '100%', padding: 8 }} /></label>
-      <button onClick={verify} style={{ marginTop: 12, padding: '8px 16px' }}>Sign in</button>
+      <button className="btn" onClick={verify} style={{ marginTop: 12, padding: '8px 16px' }}>Sign in</button>
     </>)}
-    <p><button onClick={onBack} style={{ padding: '6px 12px' }}>Back to staff sign-in</button></p>
-  </div>)
+    <p><button onClick={onBack}>Back to staff sign-in</button></p>
+  </div></div>)
 }
 
 function PortalApp({ token, onSignOut }) {
@@ -392,8 +411,8 @@ function PortalApp({ token, onSignOut }) {
     setNote('Uploaded — the firm will review it.')
     open(caseId)
   }
-  return (<div className="portal-shell" style={{ fontFamily: 'sans-serif', padding: 20 }}>
-    <div className="app-header" style={{ display: 'flex', justifyContent: 'space-between' }}>
+  return (<div className="portal">
+    <div className="portal-bar">
       <h1>Client portal</h1>
       <span>{me ? me.full_name : ''} <button onClick={onSignOut}>Sign out</button></span>
     </div>
