@@ -190,7 +190,7 @@ pre {
   display: inline-flex; align-items: center; justify-content: center;
 }
 .sidebar .tenant b { color: #fff; display: block; font-size: 13.5px; }
-.sidebar .tenant .who span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sidebar .tenant .who-text { flex: 1; min-width: 0; overflow-wrap: break-word; }
 .sidebar .logout {
   margin-top: 12px; background: transparent; border: 1px solid rgba(255, 255, 255, 0.25);
   color: var(--sidebar-text); border-radius: 9px; padding: 8px 10px; font-size: 13.5px; width: 100%;

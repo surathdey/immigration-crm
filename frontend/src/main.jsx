@@ -124,7 +124,7 @@ function App() {
           <button key={p} className={p === page ? 'active' : ''} onClick={() => go(p)}>{ICONS[icon]}<span className="nav-label">{label}</span></button>)}
       </nav>
       <div className="tenant">
-        <div className="who"><span className="avatar">{initials}</span><span><b>{me ? me.tenant : ''}</b>{me ? `${me.full_name} (${me.role})` : ''}</span></div>
+        <div className="who"><span className="avatar">{initials}</span><span className="who-text" title={me ? `${me.tenant} — ${me.full_name} (${me.role})` : ''}><b>{me ? me.tenant : ''}</b>{me ? `${me.full_name} (${me.role})` : ''}</span></div>
         <button className="logout" onClick={() => { localStorage.removeItem('icrm_token'); setToken(null) }}>Sign out</button>
       </div>
     </aside>
